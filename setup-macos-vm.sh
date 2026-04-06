@@ -272,25 +272,35 @@ build_opencore_img() {
     echo "${OCS_EFI_DIR}" > "${VM_DIR}/.ocs_efi_path"
   fi
 
-  # Créer image FAT32 200 Mo
-  qemu-img create -f raw "${OPENCORE_IMG}" 200M
-  # Partition GPT + ESP
-  sgdisk -Z -n 1:2048:411647 -t 1:EF00 -c 1:"EFI" "${OPENCORE_IMG}"
+  # --- Montage et formatage ---
+  log "Montage et formatage de la partition EFI..."
+  sudo losetup -D  # Libère tous les périphériques loop avant de créer un nouveau
+  LOOP=$(losetup --find --show --partscan "${OPENCORE_IMG}")
+  PART="${LOOP}p1"
 
-  # Monter via loop et formater
-  local LOOP
-  LOOP=$(losetup --find --partscan --show "${OPENCORE_IMG}")
-  mkfs.fat -F32 -n "EFI" "${LOOP}p1"
+  # Vérifier que la partition existe
+  if [[ ! -e "${PART}" ]]; then
+      log "Attente de la détection de la partition ${PART}..."
+      sleep 2
+      if [[ ! -e "${PART}" ]]; then
+          die "La partition ${PART} n'a pas été détectée."
+      fi
+  fi
 
-  local MNT; MNT=$(mktemp -d)
-  mount "${LOOP}p1" "${MNT}"
+  mkfs.fat -F32 -n "EFI" "${PART}"
+
+  MNT=$(mktemp -d)
+  mount "${PART}" "${MNT}"
   cp -r "${OCS_EFI_DIR}" "${MNT}/"
   sync
   umount "${MNT}"
   rmdir "${MNT}"
-  losetup -d "${LOOP}"
 
-  ok "Image OpenCore créée : ${OPENCORE_IMG}"
+  # --- Nettoyage ---
+  losetup -d "${LOOP}"
+  sudo kpartx -dv "${OPENCORE_IMG}" 2>/dev/null || true
+
+  ok "Image OpenCore créée et partitionnée : ${OPENCORE_IMG}"
 }
 
 # ── Téléchargement du Recovery macOS ─────────────────────────────────────────

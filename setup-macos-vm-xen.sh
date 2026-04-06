@@ -243,53 +243,64 @@ EOF
 build_opencore_img() {
   sep; log "Construction de l'image OpenCore (ESP 200 Mo)..."
 
-  # ── Résoudre le chemin EFI (priorité : cache → recherche → saisie manuelle)
-  local EFI_PATH=""
+  # ── Résoudre le chemin EFI (cache → recherche → saisie manuelle)
+  local OCS_EFI_DIR=""
 
-  # 1. Chemin sauvegardé par run_opcore_simplify
+  # 1. Chemin sauvegardé
   local CACHED; CACHED=$(cat "${VM_DIR}/.ocs_efi_path" 2>/dev/null || true)
   if [[ -d "${CACHED}" ]]; then
-    EFI_PATH="${CACHED}"
-    ok "EFI depuis cache : ${EFI_PATH}"
+    OCS_EFI_DIR="${CACHED}"
+    ok "EFI depuis cache : ${OCS_EFI_DIR}"
   fi
 
-  # 2. Recherche dynamique dans OCS_DIR/Results/
-  if [[ -z "${EFI_PATH}" ]]; then
-    EFI_PATH=$(find "${OCS_DIR}/Results" -maxdepth 4 -name "EFI" -type d 2>/dev/null | head -1 || true)
-    if [[ -n "${EFI_PATH}" ]]; then
-      ok "EFI trouvé : ${EFI_PATH}"
-      echo "${EFI_PATH}" > "${VM_DIR}/.ocs_efi_path"
+  # 2. Recherche dynamique dans Results/
+  if [[ -z "${OCS_EFI_DIR}" ]]; then
+    OCS_EFI_DIR=$(find "${OCS_DIR}/Results" -maxdepth 4 -name "EFI" -type d 2>/dev/null | head -1 || true)
+    if [[ -n "${OCS_EFI_DIR}" ]]; then
+      ok "EFI trouvé : ${OCS_EFI_DIR}"
+      echo "${OCS_EFI_DIR}" > "${VM_DIR}/.ocs_efi_path"
     fi
   fi
 
-  # 3. Fallback : saisie manuelle
-  if [[ -z "${EFI_PATH}" ]]; then
-    warn "Aucun dossier EFI trouvé automatiquement dans ${OCS_DIR}/Results/"
+  # 3. Saisie manuelle
+  if [[ -z "${OCS_EFI_DIR}" ]]; then
+    warn "Aucun dossier EFI trouvé dans ${OCS_DIR}/Results/"
     warn "Lancez OpCore Simplify jusqu'au bout (Build OpenCore EFI) puis relancez."
-    warn "Ou entrez le chemin manuellement (laisser vide pour annuler) :"
-    read -r -p "  Chemin vers le dossier EFI : " EFI_PATH
-    [[ -d "${EFI_PATH}" ]] || die "Chemin invalide. Relancez OpCore Simplify puis : bash $0 --skip-deps --skip-recovery"
-    echo "${EFI_PATH}" > "${VM_DIR}/.ocs_efi_path"
+    warn "Ou entrez le chemin manuellement (vide pour annuler) :"
+    read -r -p "  Chemin vers le dossier EFI : " OCS_EFI_DIR
+    [[ -d "${OCS_EFI_DIR}" ]] || die "Chemin invalide. Relancez OCS puis : bash $0 --skip-deps --skip-recovery"
+    echo "${OCS_EFI_DIR}" > "${VM_DIR}/.ocs_efi_path"
   fi
 
-  qemu-img create -f raw "${OPENCORE_IMG}" 200M
+  # --- Montage et formatage ---
+  log "Montage et formatage de la partition EFI..."
+  sudo losetup -D  # Libère tous les périphériques loop avant de créer un nouveau
+  LOOP=$(losetup --find --show --partscan "${OPENCORE_IMG}")
+  PART="${LOOP}"
 
-  # Table GPT + partition ESP
-  sgdisk -Z "${OPENCORE_IMG}"
-  sgdisk -n 1:2048:411647 -t 1:EF00 -c 1:"EFI System" "${OPENCORE_IMG}"
+  # Vérifier que la partition existe
+  if [[ ! -e "${PART}" ]]; then
+      log "Attente de la détection de la partition ${PART}..."
+      sleep 2
+      if [[ ! -e "${PART}" ]]; then
+          die "La partition ${PART} n'a pas été détectée."
+      fi
+  fi
 
-  # Formater + copier via loop device
-  local LOOP; LOOP=$(losetup --find --partscan --show "${OPENCORE_IMG}")
-  mkfs.fat -F32 -n "EFI" "${LOOP}p1"
+  mkfs.fat -F32 -n "EFI" "${PART}"
 
-  local MNT; MNT=$(mktemp -d)
-  mount "${LOOP}p1" "${MNT}"
-  cp -r "${EFI_PATH}" "${MNT}/"
+  MNT=$(mktemp -d)
+  mount "${PART}" "${MNT}"
+  cp -r "${OCS_EFI_DIR}" "${MNT}/"
   sync
-  umount "${MNT}"; rmdir "${MNT}"
-  losetup -d "${LOOP}"
+  umount "${MNT}"
+  rmdir "${MNT}"
 
-  ok "OpenCore.img : ${OPENCORE_IMG}"
+  # --- Nettoyage ---
+  losetup -d "${LOOP}"
+  sudo kpartx -dv "${OPENCORE_IMG}" 2>/dev/null || true
+
+  ok "Image OpenCore créée et partitionnée : ${OPENCORE_IMG}"
 }
 
 # ── 6. Recovery macOS ─────────────────────────────────────────────────────────
