@@ -1,3 +1,5 @@
+[![Test setup scripts (--skip-ocs --dryrun)](https://github.com/b23prodtm/macos-vm-in-linux/actions/workflows/test-dryrun.yml/badge.svg?branch=fix%2Fcreatevm)](https://github.com/b23prodtm/macos-vm-in-linux/actions/workflows/test-dryrun.yml)
+
 # macOS VM via OpenCore Simplify — openSUSE Tumbleweed + QEMU/KVM
 
 > **Prérequis matériels** : CPU Intel ou AMD avec VT-x/AMD-V, 16 Go RAM recommandés,
