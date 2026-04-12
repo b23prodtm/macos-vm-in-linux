@@ -9,6 +9,28 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# ── OPTIMIZED: Calcul dynamique de RAM et CPU ────────────────────────────────
+calculate_resources() {
+  # Récupérer mémoire totale du système (en Mo)
+  local TOTAL_RAM_MB
+  TOTAL_RAM_MB=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
+  
+  # Récupérer nombre de CPU
+  local TOTAL_CPUS
+  TOTAL_CPUS=$(nproc)
+  
+  # 80% RAM pour la VM (par défaut)
+  RAM_MB=$(( (TOTAL_RAM_MB * 80) / 100 ))
+  
+  # 100% des cores pour la VM (par défaut)
+  CPU_CORES=${TOTAL_CPUS}
+  
+  if [[ -n "${LOG_PREFIX:-}" ]]; then
+    echo -e "${GRN}[✔]${RST} Système détecté: ${TOTAL_RAM_MB}MB RAM, ${TOTAL_CPUS} CPU(s)"
+    echo -e "${GRN}[✔]${RST} Allocation VM (défaut): ${RAM_MB}MB RAM (80%), ${CPU_CORES} CPU(s) (100%)"
+  fi
+}
+
 # ── Mode rootless : détection sudo ───────────────────────────────────────────
 # Le script peut tourner en tant qu'utilisateur normal.
 # Les commandes nécessitant des droits élevés utilisent $SUDO automatiquement.
@@ -33,6 +55,28 @@ warn() { echo -e "${YEL}[!]${RST} $*"; }
 die()  { echo -e "${RED}[✘]${RST} $*" >&2; exit 1; }
 sep()  { echo -e "${CYA}────────────────────────────────────────────────────${RST}"; }
 
+# ── OPTIMIZED: Calcul dynamique de RAM et CPU ────────────────────────────────
+# Appelée après la définition des couleurs pour affichage correct
+calculate_resources() {
+  local TOTAL_RAM_MB TOTAL_CPUS
+  TOTAL_RAM_MB=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
+  TOTAL_CPUS=$(nproc)
+  ok "Système détecté : ${TOTAL_RAM_MB} Mo RAM, ${TOTAL_CPUS} CPU(s)"
+  # Ne pas écraser si --ram/--cores passés manuellement
+  if [[ "${RAM_OVERRIDE:-0}" -eq 0 ]]; then
+    RAM_MB=$(( (TOTAL_RAM_MB * 80) / 100 ))
+    ok "RAM VM (80% auto) : ${RAM_MB} Mo"
+  else
+    ok "RAM VM (manuel)   : ${RAM_MB} Mo"
+  fi
+  if [[ "${CORES_OVERRIDE:-0}" -eq 0 ]]; then
+    CPU_CORES=${TOTAL_CPUS}
+    ok "CPUs VM (100% auto) : ${CPU_CORES}"
+  else
+    ok "CPUs VM (manuel)    : ${CPU_CORES}"
+  fi
+}
+
 # ── Mode dry-run ──────────────────────────────────────────────────────────────
 # En dryrun, les commandes destructives/lentes sont simulées
 run() {
@@ -43,18 +87,23 @@ run() {
   fi
 }
 
-# ── Valeurs par défaut ────────────────────────────────────────────────────────
+# ── Valeurs par défaut (calculées dynamiquement) ──────────────────────────────
 MACOS_VERSION="ventura"   # sequoia | sonoma | ventura | monterey | big-sur
 DISK_SIZE="80G"
-RAM_MB=8192               # en Mo (Xen utilise des Mo)
-CPU_CORES=4
+RAM_MB=8192               # valeur initiale — écrasée par calculate_resources()
+CPU_CORES=4               # valeur initiale — écrasée par calculate_resources()
 BRIDGE="xenbr0"           # bridge réseau Xen ; fallback virbr0
 VM_DIR="${HOME}/VMs/macos-${MACOS_VERSION}"
 OCS_DIR="${HOME}/opcore-simplify"
 OCS_REPO="https://github.com/b23prodtm/OpCore-Simplify.git"
 OCS_BRANCH="fix/validator"
 
-SKIP_DEPS=0; SKIP_OCS=0; SKIP_RECOVERY=0; RUN_ONLY=0; DRYRUN=0; SKIP_LIBVIRT=0
+SKIP_DEPS=0; SKIP_OCS=0; SKIP_RECOVERY=0; RUN_ONLY=0; DRYRUN=0; SKIP_LIBVIRT=0; FORCE_REBUILD=0
+RAM_OVERRIDE=0; CORES_OVERRIDE=0
+
+# Calculer les ressources (avant parsing args) — OPTIMIZED
+LOG_PREFIX=1
+calculate_resources
 
 usage() {
 cat <<EOF
@@ -63,8 +112,8 @@ ${BLD}Usage :${RST} $0 [OPTIONS]
   --macos VERSION      Version cible (défaut: ventura)
                        sequoia | sonoma | ventura | monterey | big-sur
   --disk-size SIZE     Taille disque (défaut: 80G)
-  --ram MB             RAM en Mo (défaut: 8192)
-  --cores N            vCPUs (défaut: 4)
+  --ram MB             RAM en Mo (défaut: 80% du système — auto-détecté)
+  --cores N            vCPUs (défaut: 100% du système — auto-détecté)
   --bridge BRIDGE      Bridge réseau (défaut: xenbr0)
   --vm-dir PATH        Répertoire VM
   --ocs-dir PATH       Répertoire OpCore Simplify
@@ -72,6 +121,7 @@ ${BLD}Usage :${RST} $0 [OPTIONS]
   --skip-ocs           EFI déjà généré
   --skip-recovery      Ne pas re-télécharger le BaseSystem
   --skip-libvirt       Ne pas enregistrer dans libvirt/virt-manager
+  --force-rebuild      Reconstruire OpenCore.img sans demander confirmation
   --run-only           Lancer la VM directement ($SUDO xl create)
   --dryrun             Simuler toutes les étapes sans rien écrire ni installer
   --help
@@ -83,8 +133,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --macos)         MACOS_VERSION="$2"; shift 2 ;;
     --disk-size)     DISK_SIZE="$2";     shift 2 ;;
-    --ram)           RAM_MB="$2";        shift 2 ;;
-    --cores)         CPU_CORES="$2";     shift 2 ;;
+    --ram)           RAM_MB="$2"; RAM_OVERRIDE=1;   shift 2 ;;
+    --cores)         CPU_CORES="$2"; CORES_OVERRIDE=1; shift 2 ;;
     --bridge)        BRIDGE="$2";        shift 2 ;;
     --vm-dir)        VM_DIR="$2";        shift 2 ;;
     --ocs-dir)       OCS_DIR="$2";       shift 2 ;;
@@ -92,6 +142,7 @@ while [[ $# -gt 0 ]]; do
     --skip-ocs)      SKIP_OCS=1;         shift   ;;
     --skip-recovery) SKIP_RECOVERY=1;    shift   ;;
     --skip-libvirt)  SKIP_LIBVIRT=1;     shift   ;;
+    --force-rebuild) FORCE_REBUILD=1;    shift   ;;
     --run-only)      RUN_ONLY=1;         shift   ;;
     --dryrun)        DRYRUN=1;           shift   ;;
     --help|-h)       usage ;;
@@ -291,10 +342,14 @@ build_opencore_img() {
       done <<< "${LOCKED_LOOPS}"
     fi
 
-    read -r -p "  Reconstruire (écrase l'image existante) ? [o/N] " REBUILD
-    if [[ "${REBUILD,,}" != "o" ]]; then
-      ok "Image OpenCore conservée."
-      return 0
+    if [[ "${FORCE_REBUILD:-0}" -eq 1 ]]; then
+      warn "Force rebuild demandé (--force-rebuild)."
+    else
+      read -r -p "  Reconstruire (écrase l'image existante) ? [o/N] " REBUILD
+      if [[ "${REBUILD,,}" != "o" ]]; then
+        ok "Image OpenCore conservée."
+        return 0
+      fi
     fi
     # Détacher tous les loop devices avant d'écraser
     $SUDO losetup -j "${OPENCORE_IMG}" 2>/dev/null | cut -d: -f1 | \
@@ -527,289 +582,22 @@ on_crash    = "preserve"
 serial      = "none"
 XL
 
-  # Rétrocompatibilité : run-install.sh et run.sh délèguent à vm.sh
-  cat > "${VM_DIR}/run-install.sh" <<'SH'
-#!/usr/bin/env bash
-exec "$(dirname "$0")/vm.sh" start-install "$@"
-SH
-  chmod +x "${VM_DIR}/run-install.sh"
+  # ── Copier le template vm.sh depuis le répertoire du script ──────────────
+  local SCRIPT_REPO_DIR; SCRIPT_REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local VM_TEMPLATE="${SCRIPT_REPO_DIR}/vm.sh"
 
-  cat > "${VM_DIR}/run.sh" <<'SH'
-#!/usr/bin/env bash
-exec "$(dirname "$0")/vm.sh" start "$@"
-SH
-  chmod +x "${VM_DIR}/run.sh"
-
-  # ── Script de gestion complet vm.sh ───────────────────────────
-  cat > "${VM_DIR}/vm.sh" <<VMSH
-#!/usr/bin/env bash
-# =============================================================
-#  vm.sh — Gestion de la VM macOS ${MACOS_VERSION} via xl
-#  Usage : ./vm.sh <commande>
-# =============================================================
-set -euo pipefail
-
-DIR="\$(cd "\$(dirname "\$0")" && pwd)"
-VM_INSTALL="macos-${MACOS_VERSION}-install"
-VM_NORMAL="macos-${MACOS_VERSION}"
-XL_INSTALL="\${DIR}/macos-install.xl"
-XL_NORMAL="\${DIR}/macos.xl"
-VNC_PORT=5900
-
-# Détection sudo
-if [[ "\$(id -u)" -eq 0 ]]; then SUDO=""; else SUDO="sudo"; fi
-
-# Couleurs
-GRN='\033[0;32m'; YEL='\033[1;33m'; RED='\033[0;31m'
-BLU='\033[0;34m'; CYA='\033[0;36m'; RST='\033[0m'; BLD='\033[1m'
-ok()   { echo -e "\${GRN}[✔]\${RST} \$*"; }
-warn() { echo -e "\${YEL}[!]\${RST} \$*"; }
-err()  { echo -e "\${RED}[✘]\${RST} \$*" >&2; }
-info() { echo -e "\${BLU}[i]\${RST} \$*"; }
-sep()  { echo -e "\${CYA}────────────────────────────────────────────────────\${RST}"; }
-
-# Retourne le domid d'une VM ou "" si absente
-_domid() { \$SUDO xl list 2>/dev/null | awk -v n="\$1" '\$1==n{print \$2}'; }
-
-# Retourne l'état d'une VM : running | paused | absent
-_state() {
-  local S; S=\$(\$SUDO xl list 2>/dev/null | awk -v n="\$1" '\$1==n{print \$5}')
-  case "\$S" in
-    r*|b*) echo "running" ;;
-    p*)    echo "paused"  ;;
-    "")    echo "absent"  ;;
-    *)     echo "\$S"     ;;
-  esac
-}
-
-usage() {
-  sep
-  echo -e "\${BLD}  vm.sh — Gestion VM macOS ${MACOS_VERSION}\${RST}"
-  sep
-  cat <<EOF
-
-\${BLD}Commandes :\${RST}
-
-  \${BLD}start\${RST}           Démarrer la VM (mode normal, après installation)
-  \${BLD}start-install\${RST}   Démarrer en mode installation (avec Recovery)
-  \${BLD}stop\${RST}            Arrêt propre (ACPI shutdown)
-  \${BLD}kill\${RST}            Forcer l'arrêt immédiat (xl destroy)
-  \${BLD}restart\${RST}         Redémarrer la VM
-  \${BLD}pause\${RST}           Suspendre (gel de la VM)
-  \${BLD}resume\${RST}          Reprendre après pause
-  \${BLD}status\${RST}          Afficher l'état de la VM
-  \${BLD}list\${RST}            Lister toutes les VMs Xen actives
-  \${BLD}vnc\${RST}             Ouvrir le client VNC (vncviewer)
-  \${BLD}console\${RST}         Console série (Ctrl+] pour quitter)
-  \${BLD}log\${RST}             Derniers logs QEMU/Xen
-  \${BLD}info\${RST}            Infos détaillées (dominfo + vcpu-list)
-  \${BLD}help\${RST}            Afficher cette aide
-
-\${BLD}Exemples :\${RST}
-  ./vm.sh start-install   # 1er démarrage pour installer macOS
-  ./vm.sh vnc             # Se connecter à l'écran
-  ./vm.sh stop            # Éteindre proprement
-  ./vm.sh kill            # Forcer l'extinction
-  ./vm.sh log             # Voir les erreurs QEMU
-EOF
-  sep
-}
-
-cmd_start() {
-  local NAME="\${1:-\${VM_NORMAL}}"
-  local XLCFG="\${2:-\${XL_NORMAL}}"
-  local STATE; STATE=\$(_state "\${NAME}")
-
-  if [[ "\${STATE}" == "running" ]]; then
-    warn "La VM '\${NAME}' est déjà en cours d'exécution (domid: \$(_domid "\${NAME}"))."
-    info "Connectez-vous via VNC : vncviewer localhost:\${VNC_PORT}"
-    return 0
-  fi
-
-  [[ -f "\${XLCFG}" ]] || { err "Config xl introuvable : \${XLCFG}"; exit 1; }
-
-  info "Démarrage de '\${NAME}'..."
-  \$SUDO xl create "\${XLCFG}"
-  sleep 2
-
-  local DOMID; DOMID=\$(_domid "\${NAME}")
-  if [[ -n "\${DOMID}" ]]; then
-    ok "VM démarrée (domid: \${DOMID})"
-    info "VNC disponible sur localhost:\${VNC_PORT}"
-    info "Lancez : ./vm.sh vnc"
+  if [[ -f "${VM_TEMPLATE}" ]]; then
+    # Substituer les variables @@...@@ dans le template
+    sed \
+      -e "s|@@MACOS_VERSION@@|${MACOS_VERSION}|g" \
+      -e "s|@@OCS_DIR@@|${OCS_DIR}|g" \
+      "${VM_TEMPLATE}" > "${VM_DIR}/vm.sh"
+    chmod +x "${VM_DIR}/vm.sh"
+    ok "vm.sh installé depuis template : ${VM_TEMPLATE}"
   else
-    err "La VM n'apparaît pas dans xl list — vérifiez : ./vm.sh log"
-    exit 1
+    warn "Template vm.sh introuvable dans ${SCRIPT_REPO_DIR}/ — vm.sh non généré."
+    warn "Clonez le dépôt complet ou copiez vm.sh manuellement."
   fi
-}
-
-cmd_start_install() {
-  info "Mode installation (Recovery monté)..."
-  cmd_start "\${VM_INSTALL}" "\${XL_INSTALL}"
-}
-
-cmd_stop() {
-  local NAME="\${VM_NORMAL}"
-  [[ "\$(_state "\${NAME}")" == "absent" ]] && NAME="\${VM_INSTALL}"
-  local STATE; STATE=\$(_state "\${NAME}")
-
-  if [[ "\${STATE}" == "absent" ]]; then
-    warn "Aucune VM macOS en cours d'exécution."
-    return 0
-  fi
-
-  info "Arrêt ACPI de '\${NAME}' (peut prendre 30s)..."
-  \$SUDO xl shutdown "\${NAME}"
-  local I=0
-  while [[ \$(_state "\${NAME}") != "absent" && \$I -lt 40 ]]; do
-    sleep 1; (( I++ )); printf '.'
-  done
-  echo ""
-  if [[ \$(_state "\${NAME}") == "absent" ]]; then
-    ok "VM arrêtée."
-  else
-    warn "La VM ne répond pas. Utilisez './vm.sh kill' pour forcer l'arrêt."
-  fi
-}
-
-cmd_kill() {
-  local NAME="\${VM_NORMAL}"
-  [[ "\$(_state "\${NAME}")" == "absent" ]] && NAME="\${VM_INSTALL}"
-
-  if [[ "\$(_state "\${NAME}")" == "absent" ]]; then
-    warn "Aucune VM macOS active à détruire."
-    return 0
-  fi
-  warn "Destruction forcée de '\${NAME}'..."
-  \$SUDO xl destroy "\${NAME}"
-  ok "VM détruite."
-}
-
-cmd_restart() {
-  local NAME="\${VM_NORMAL}"
-  [[ "\$(_state "\${NAME}")" == "absent" ]] && NAME="\${VM_INSTALL}"
-
-  if [[ "\$(_state "\${NAME}")" == "absent" ]]; then
-    warn "Aucune VM active. Lancement en mode normal..."
-    cmd_start; return
-  fi
-  info "Redémarrage de '\${NAME}'..."
-  \$SUDO xl reboot "\${NAME}"
-  ok "Redémarrage envoyé."
-}
-
-cmd_pause() {
-  local NAME="\${VM_NORMAL}"
-  [[ "\$(_state "\${NAME}")" == "absent" ]] && NAME="\${VM_INSTALL}"
-  \$SUDO xl pause "\${NAME}" && ok "VM suspendue." || err "Échec de la suspension."
-}
-
-cmd_resume() {
-  local NAME="\${VM_NORMAL}"
-  [[ "\$(_state "\${NAME}")" != "paused" ]] && NAME="\${VM_INSTALL}"
-  \$SUDO xl unpause "\${NAME}" && ok "VM reprise." || err "Échec de la reprise."
-}
-
-cmd_status() {
-  sep
-  echo -e "\${BLD}  État VM macOS ${MACOS_VERSION}\${RST}"
-  sep
-  for NAME in "\${VM_INSTALL}" "\${VM_NORMAL}"; do
-    local STATE; STATE=\$(_state "\${NAME}")
-    local DOMID; DOMID=\$(_domid "\${NAME}")
-    case "\${STATE}" in
-      running) echo -e "  \${GRN}●\${RST} \${BLD}\${NAME}\${RST} — \${GRN}en cours\${RST} (domid: \${DOMID})" ;;
-      paused)  echo -e "  \${YEL}⏸\${RST} \${BLD}\${NAME}\${RST} — \${YEL}suspendue\${RST} (domid: \${DOMID})" ;;
-      absent)  echo -e "  \${RED}○\${RST} \${BLD}\${NAME}\${RST} — arrêtée" ;;
-      *)       echo -e "  \${YEL}?\${RST} \${BLD}\${NAME}\${RST} — état: \${STATE}" ;;
-    esac
-  done
-  sep
-  local FREE_MEM; FREE_MEM=\$(\$SUDO xl info 2>/dev/null | awk '/^free_memory/{print \$3}')
-  [[ -n "\${FREE_MEM}" ]] && info "Mémoire Xen libre : \${FREE_MEM} Mo"
-  info "VNC : localhost:\${VNC_PORT}"
-  sep
-}
-
-cmd_list() { \$SUDO xl list; }
-
-cmd_vnc() {
-  if command -v vncviewer &>/dev/null; then
-    info "Connexion VNC sur localhost:\${VNC_PORT}..."
-    vncviewer "localhost:\${VNC_PORT}"
-  else
-    err "vncviewer introuvable."
-    info "Installez-le : sudo zypper install tigervnc"
-    info "Ou connectez-vous manuellement sur localhost:\${VNC_PORT}"
-  fi
-}
-
-cmd_console() {
-  local NAME="\${VM_NORMAL}"
-  [[ "\$(_state "\${NAME}")" == "absent" ]] && NAME="\${VM_INSTALL}"
-  if [[ "\$(_state "\${NAME}")" == "absent" ]]; then
-    err "Aucune VM macOS active."; exit 1
-  fi
-  info "Console série de '\${NAME}' (Ctrl+] pour quitter)..."
-  \$SUDO xl console "\${NAME}"
-}
-
-cmd_log() {
-  sep
-  echo -e "\${BLD}  Derniers logs Xen/QEMU\${RST}"
-  sep
-  local QLOG; QLOG=\$(ls -t /var/log/xen/qemu-dm-*.log 2>/dev/null | head -1 || true)
-  if [[ -n "\${QLOG}" ]]; then
-    info "Log QEMU : \${QLOG}"
-    echo ""
-    \$SUDO tail -40 "\${QLOG}"
-  else
-    warn "Aucun log QEMU trouvé dans /var/log/xen/"
-  fi
-  sep
-  for XLLOG in /var/log/xen/xl-${MACOS_VERSION}-install.log /var/log/xen/xl-${MACOS_VERSION}.log; do
-    if [[ -f "\${XLLOG}" ]]; then
-      info "Log xl : \${XLLOG}"
-      \$SUDO tail -20 "\${XLLOG}"
-      sep
-    fi
-  done
-}
-
-cmd_info() {
-  local NAME="\${VM_NORMAL}"
-  [[ "\$(_state "\${NAME}")" == "absent" ]] && NAME="\${VM_INSTALL}"
-  local DOMID; DOMID=\$(_domid "\${NAME}")
-  if [[ -z "\${DOMID}" ]]; then
-    err "VM non active. Démarrez-la d'abord."; exit 1
-  fi
-  \$SUDO xl dominfo "\${NAME}"
-  sep
-  \$SUDO xl vcpu-list "\${NAME}"
-}
-
-# ── Dispatch ─────────────────────────────────────────────────
-CMD="\${1:-help}"
-shift || true
-case "\${CMD}" in
-  start)          cmd_start ;;
-  start-install)  cmd_start_install ;;
-  stop)           cmd_stop ;;
-  kill)           cmd_kill ;;
-  restart)        cmd_restart ;;
-  pause)          cmd_pause ;;
-  resume)         cmd_resume ;;
-  status)         cmd_status ;;
-  list)           cmd_list ;;
-  vnc)            cmd_vnc ;;
-  console)        cmd_console ;;
-  log)            cmd_log ;;
-  info)           cmd_info ;;
-  help|--help|-h) usage ;;
-  *) err "Commande inconnue : '\${CMD}'"; usage; exit 1 ;;
-esac
-VMSH
-  chmod +x "${VM_DIR}/vm.sh"
 
   ok "Configs xl générées :"
   ok "  Installation : ${VM_DIR}/macos-install.xl"
@@ -924,16 +712,16 @@ register_libvirt() {
   <on_crash>preserve</on_crash>
 
   <devices>
-    <!-- OpenCore EFI boot disk -->
+    <!-- OpenCore EFI boot disk — OPTIMIZED: cache=writeback pour UEFI rapide -->
     <disk type='file' device='disk'>
-      <driver name='qemu' type='raw' cache='none'/>
+      <driver name='qemu' type='raw' cache='writeback'/>
       <source file='${OPENCORE_IMG}'/>
       <target dev='hda' bus='ide'/>
     </disk>
 
-    <!-- macOS main disk -->
+    <!-- macOS main disk — OPTIMIZED: cache=writeback pour I/O rapide -->
     <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2' cache='unsafe' discard='unmap'/>
+      <driver name='qemu' type='qcow2' cache='writeback' discard='unmap'/>
       <source file='${MACOS_DISK}'/>
       <target dev='hdb' bus='ide'/>
     </disk>
@@ -954,8 +742,8 @@ register_libvirt() {
       <model type='vga' vram='131072'/>
     </video>
 
-    <!-- Audio : ich9 non supporté par Xen/libvirt → ac97 -->
-    <sound model='ac97'/>
+    <!-- Audio DISABLED — OPTIMIZED: Pas audio pour boot rapide en VM headless -->
+    <!-- <sound model='ac97'/> -->
   </devices>
 </domain>
 XMLEOF
@@ -981,8 +769,8 @@ print_summary() {
   cat <<EOF
 
 ${BLD}Répertoire :${RST}  ${VM_DIR}
-${BLD}RAM        :${RST}  ${RAM_MB} Mo
-${BLD}CPUs       :${RST}  ${CPU_CORES}
+${BLD}RAM        :${RST}  ${RAM_MB} Mo (80% du système)
+${BLD}CPUs       :${RST}  ${CPU_CORES} (100% du système)
 ${BLD}Bridge     :${RST}  ${BRIDGE:-"(aucun)"}
 
 ${BLD}${YEL}── Étape 1 : Installation macOS ──────────────────────────────${RST}
@@ -1033,6 +821,10 @@ launch_vm() {
 sep
 echo -e "${BLD}  macOS VM Setup — openSUSE Tumbleweed + Xen HVM${RST}"
 echo -e "${BLD}  Version macOS : ${CYA}${MACOS_VERSION}${RST}"
+echo -e "${BLD}  Ressources : ${CYA}${RAM_MB}MB RAM (80% système), ${CPU_CORES} CPU (100% système)${RST}"
+sep
+# Calculer les ressources système si non surchargées par --ram/--cores
+calculate_resources
 sep
 
 if [[ "$RUN_ONLY" -eq 1 ]]; then
