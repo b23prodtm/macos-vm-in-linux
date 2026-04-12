@@ -240,8 +240,8 @@ Après une mise à jour d'OpenCore Simplify ou de votre config :
 cd ~/opcore-simplify && python3 main.py
 
 # Reconstruire uniquement l'image OpenCore
-sudo bash setup-macos-vm.sh --macos ventura --skip-deps --skip-recovery
-sudo bash setup-macos-vm.sh --macos ventura --skip-deps --skip-recovery --skip-ocs
+bash setup-macos-vm.sh --macos ventura --skip-deps --skip-recovery
+bash setup-macos-vm.sh --macos ventura --skip-deps --skip-recovery --skip-ocs
 
 ```
 

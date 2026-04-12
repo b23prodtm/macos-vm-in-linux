@@ -9,10 +9,19 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# ── Vérification root ─────────────────────────────────────────────────────────
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo -e "\033[0;31m[✘]\033[0m Ce script doit être exécuté en root : bash $0 $*"
-  exit 1
+# ── Mode rootless : détection sudo ───────────────────────────────────────────
+# Le script peut tourner en tant qu'utilisateur normal.
+# Les commandes nécessitant des droits élevés utilisent $SUDO automatiquement.
+if [[ "$(id -u)" -eq 0 ]]; then
+  SUDO=""
+else
+  if command -v sudo &>/dev/null; then
+    SUDO="sudo"
+    echo -e "\033[1;33m[!]\033[0m Mode rootless : les commandes privilégiées utiliseront sudo."
+  else
+    echo -e "\033[0;31m[✘]\033[0m sudo introuvable et vous n'êtes pas root. Installez sudo ou relancez en root."
+    exit 1
+  fi
 fi
 
 RED='\033[0;31m'; GRN='\033[0;32m'; YEL='\033[1;33m'
@@ -63,7 +72,7 @@ ${BLD}Usage :${RST} $0 [OPTIONS]
   --skip-ocs           EFI déjà généré
   --skip-recovery      Ne pas re-télécharger le BaseSystem
   --skip-libvirt       Ne pas enregistrer dans libvirt/virt-manager
-  --run-only           Lancer la VM directement (xl create)
+  --run-only           Lancer la VM directement ($SUDO xl create)
   --dryrun             Simuler toutes les étapes sans rien écrire ni installer
   --help
 EOF
@@ -113,11 +122,11 @@ check_xen() {
   ok "Xen dom0 confirmé"
 
   # xl disponible ?
-  command -v xl &>/dev/null || die "'xl' introuvable. Installez xen-tools."
-  ok "xl : $(xl info | awk '/^xen_version/{print $3}')"
+  $SUDO which xl &>/dev/null || die "'xl' introuvable. Installez xen-tools."
+  ok "$SUDO xl : $($SUDO xl info | awk '/^xen_version/{print $3}')"
 
   # Version Xen
-  local XEN_VER; XEN_VER=$(xl info 2>/dev/null | awk '/^xen_version/{print $3}')
+  local XEN_VER; XEN_VER=$($SUDO xl info 2>/dev/null | awk '/^xen_version/{print $3}')
   ok "Xen version : ${XEN_VER}"
 
   # Bridge réseau
@@ -154,10 +163,10 @@ install_deps() {
     gdisk                  # sgdisk pour partitionner l'ESP
   )
 
-  run zypper --non-interactive refresh
+  run $SUDO zypper --non-interactive refresh
   # ovmf peut s'appeler différemment sur Tumbleweed
-  run zypper --non-interactive install --no-recommends "${PKGS[@]}" 2>/dev/null || \
-  run zypper --non-interactive install --no-recommends \
+  run $SUDO zypper --non-interactive install --no-recommends "${PKGS[@]}" 2>/dev/null || \
+  run $SUDO zypper --non-interactive install --no-recommends \
     xen-tools xen-libs qemu-x86 qemu-tools \
     python3 python3-pip git wget curl \
     dmidecode acpica p7zip-full gdisk || true
@@ -193,7 +202,8 @@ prepare_dirs() {
   sep; log "Préparation de ${VM_DIR}..."
   mkdir -p "${VM_DIR}"
   if [[ -n "${OVMF_VARS_SRC}" && ! -f "${VM_DIR}/OVMF_VARS.fd" ]]; then
-    cp "${OVMF_VARS_SRC}" "${VM_DIR}/OVMF_VARS.fd"
+    $SUDO cp "${OVMF_VARS_SRC}" "${VM_DIR}/OVMF_VARS.fd"
+    $SUDO chown "$USER" "${VM_DIR}/OVMF_VARS.fd" 2>/dev/null || true
     ok "OVMF_VARS.fd copié (persistant par VM)"
   fi
 }
@@ -273,11 +283,11 @@ build_opencore_img() {
 
     # Libérer tout loop device orphelin tenant le fichier
     local LOCKED_LOOPS
-    LOCKED_LOOPS=$(losetup -j "${OPENCORE_IMG}" 2>/dev/null | cut -d: -f1 || true)
+    LOCKED_LOOPS=$($SUDO losetup -j "${OPENCORE_IMG}" 2>/dev/null | cut -d: -f1 || true)
     if [[ -n "${LOCKED_LOOPS}" ]]; then
       warn "Loop devices orphelins détectés : ${LOCKED_LOOPS}"
       while IFS= read -r LOOP; do
-        losetup -d "${LOOP}" 2>/dev/null && warn "  Libéré : ${LOOP}" || true
+        $SUDO losetup -d "${LOOP}" 2>/dev/null && warn "  Libéré : ${LOOP}" || true
       done <<< "${LOCKED_LOOPS}"
     fi
 
@@ -287,8 +297,8 @@ build_opencore_img() {
       return 0
     fi
     # Détacher tous les loop devices avant d'écraser
-    losetup -j "${OPENCORE_IMG}" 2>/dev/null | cut -d: -f1 | \
-      xargs -r -I{} losetup -d {} 2>/dev/null || true
+    $SUDO losetup -j "${OPENCORE_IMG}" 2>/dev/null | cut -d: -f1 | \
+      xargs -r -I{} $SUDO losetup -d {} 2>/dev/null || true
     rm -f "${OPENCORE_IMG}"
   fi
 
@@ -326,20 +336,20 @@ build_opencore_img() {
 
   # Table GPT + partition ESP en un seul appel sgdisk
   # -Z : effacer, -o : nouvelle table GPT, -n 1:2048:-1 : jusqu'au dernier secteur
-  run sgdisk -Z -o \
+  run $SUDO sgdisk -Z -o \
     -n 1:2048:-1 -t 1:EF00 -c 1:"EFI System" \
     "${OPENCORE_IMG}"
 
   # Formater + copier via loop device
-  local LOOP; LOOP=$(losetup --find --partscan --show "${OPENCORE_IMG}")
-  run mkfs.fat -F32 -n "EFI" "${LOOP}p1"
+  local LOOP; LOOP=$($SUDO losetup --find --partscan --show "${OPENCORE_IMG}")
+  run $SUDO mkfs.fat -F32 -n "EFI" "${LOOP}p1"
 
   local MNT; MNT=$(mktemp -d)
-  run mount "${LOOP}p1" "${MNT}"
-  run cp -r "${EFI_PATH}" "${MNT}/"
+  run $SUDO mount "${LOOP}p1" "${MNT}"
+  run $SUDO cp -r "${EFI_PATH}" "${MNT}/"
   sync
-  run umount "${MNT}"; rmdir "${MNT}"
-  run losetup -d "${LOOP}"
+  run $SUDO umount "${MNT}"; rmdir "${MNT}"
+  run $SUDO losetup -d "${LOOP}"
 
   ok "OpenCore.img : ${OPENCORE_IMG}"
 }
@@ -410,7 +420,7 @@ generate_xl_config() {
   cat > "${VM_DIR}/macos-install.xl" <<XL
 # ═══════════════════════════════════════════════════════════════
 #  Configuration Xen HVM — macOS ${MACOS_VERSION} (mode INSTALLATION)
-#  Utilisation : xl create ${VM_DIR}/macos-install.xl
+#  Utilisation : $SUDO xl create ${VM_DIR}/macos-install.xl
 # ═══════════════════════════════════════════════════════════════
 
 name        = "macos-${MACOS_VERSION}-install"
@@ -477,7 +487,7 @@ XL
   cat > "${VM_DIR}/macos.xl" <<XL
 # ═══════════════════════════════════════════════════════════════
 #  Configuration Xen HVM — macOS ${MACOS_VERSION} (mode NORMAL)
-#  Utilisation : xl create ${VM_DIR}/macos.xl
+#  Utilisation : $SUDO xl create ${VM_DIR}/macos.xl
 # ═══════════════════════════════════════════════════════════════
 
 name        = "macos-${MACOS_VERSION}"
@@ -523,7 +533,7 @@ XL
 # Lance la VM macOS en mode installation (Recovery monté)
 XLCFG="$(dirname "$0")/macos-install.xl"
 echo "[*] Démarrage VM macOS (mode installation) via xl..."
-xl create "${XLCFG}"
+$SUDO xl create "${XLCFG}"
 echo "[*] Pour voir l'écran, connectez un client VNC sur localhost:5900"
 echo "    Exemple : vncviewer localhost:5900"
 echo "    Ou via SSH : ssh -L 5900:127.0.0.1:5900 user@dom0 puis vncviewer localhost:5900"
@@ -535,7 +545,7 @@ SH
 # Lance la VM macOS en mode normal (après installation)
 XLCFG="$(dirname "$0")/macos.xl"
 echo "[*] Démarrage VM macOS via xl..."
-xl create "${XLCFG}"
+$SUDO xl create "${XLCFG}"
 echo "[*] VNC : vncviewer localhost:5900"
 SH
   chmod +x "${VM_DIR}/run.sh"
@@ -552,7 +562,7 @@ register_libvirt() {
   # Vérifier que libvirt+virsh sont disponibles
   if ! command -v virsh &>/dev/null; then
     warn "virsh introuvable — installation de libvirt..."
-    run zypper --non-interactive install --no-recommends \
+    run $SUDO zypper --non-interactive install --no-recommends \
       libvirt libvirt-daemon-xen virt-manager virsh
   fi
 
@@ -569,7 +579,7 @@ register_libvirt() {
 
   if [[ -z "${LIBVIRT_SVC}" ]]; then
     warn "Aucun service libvirt détecté — réinstallation..."
-    run zypper --non-interactive install --no-recommends \
+    run $SUDO zypper --non-interactive install --no-recommends \
       libvirt libvirt-daemon-xen libvirt-client
     # Redetect
     for svc in libvirtd virtqemud libvirtd.socket; do
@@ -581,7 +591,7 @@ register_libvirt() {
 
   if [[ -n "${LIBVIRT_SVC}" ]]; then
     if ! systemctl is-active --quiet "${LIBVIRT_SVC}" 2>/dev/null; then
-      run systemctl enable --now "${LIBVIRT_SVC}"
+      run $SUDO systemctl enable --now "${LIBVIRT_SVC}"
     fi
     ok "Service libvirt : ${LIBVIRT_SVC}"
   else
@@ -693,8 +703,8 @@ XMLEOF
   _write_libvirt_xml "macos-${MACOS_VERSION}-install" "${VM_DIR}/macos-${MACOS_VERSION}-install.xml" "1"
 
   # Enregistrer dans libvirt via le driver Xen
-  virsh -c xen:/// define "${VM_DIR}/macos-${MACOS_VERSION}.xml"
-  virsh -c xen:/// define "${VM_DIR}/macos-${MACOS_VERSION}-install.xml"
+  $SUDO virsh -c xen:/// define "${VM_DIR}/macos-${MACOS_VERSION}.xml"
+  $SUDO virsh -c xen:/// define "${VM_DIR}/macos-${MACOS_VERSION}-install.xml"
 
   ok "VM enregistrées dans libvirt (driver xen:///)"
   ok "Ouvrez virt-manager → Fichier → Ajouter une connexion → Xen"
@@ -714,7 +724,7 @@ ${BLD}CPUs       :${RST}  ${CPU_CORES}
 ${BLD}Bridge     :${RST}  ${BRIDGE:-"(aucun)"}
 
 ${BLD}${YEL}── Étape 1 : Installation macOS ──────────────────────────────${RST}
-  xl create ${VM_DIR}/macos-install.xl
+  $SUDO xl create ${VM_DIR}/macos-install.xl
   vncviewer localhost:5900
 
   Dans OpenCore picker :
@@ -724,14 +734,14 @@ ${BLD}${YEL}── Étape 1 : Installation macOS ──────────�
     4. Réinstaller macOS → sélectionner le disque APFS
 
 ${BLD}${YEL}── Étape 2 : Après installation ──────────────────────────────${RST}
-  xl create ${VM_DIR}/macos.xl
+  $SUDO xl create ${VM_DIR}/macos.xl
   vncviewer localhost:5900
 
 ${BLD}${YEL}── Commandes xl utiles ────────────────────────────────────────${RST}
-  xl list                        # VMs actives
-  xl console macos-${MACOS_VERSION}      # Console série
-  xl destroy macos-${MACOS_VERSION}      # Forcer l'extinction
-  xl pause / xl unpause          # Suspendre/reprendre
+  $SUDO xl list                        # VMs actives
+  $SUDO xl console macos-${MACOS_VERSION}      # Console série
+  $SUDO xl destroy macos-${MACOS_VERSION}      # Forcer l'extinction
+  $SUDO xl pause / $SUDO xl unpause          # Suspendre/reprendre
 
 ${BLD}${YEL}── Si VNC distant (SSH tunnel) ────────────────────────────────${RST}
   # Sur votre poste local :
@@ -744,7 +754,7 @@ EOF
 
 launch_vm() {
   sep; log "Lancement de la VM macOS (mode installation)..."
-  xl create "${VM_DIR}/macos-install.xl"
+  $SUDO xl create "${VM_DIR}/macos-install.xl"
   log "VM démarrée. Connectez-vous via VNC : vncviewer localhost:5900"
 }
 
@@ -777,5 +787,5 @@ if [[ "${DRYRUN:-0}" -eq 1 ]]; then
   exit 0
 fi
 
-read -r -p "Lancer la VM maintenant (xl create) ? [o/N] " GO
+read -r -p "Lancer la VM maintenant ($SUDO xl create) ? [o/N] " GO
 [[ "${GO,,}" == "o" ]] && launch_vm || ok "Lancez manuellement : bash ${VM_DIR}/run-install.sh"
