@@ -23,6 +23,15 @@ warn() { echo -e "${YEL}[!]${RST} $*"; }
 die()  { echo -e "${RED}[✘] ERREUR :${RST} $*" >&2; exit 1; }
 sep()  { echo -e "${CYA}────────────────────────────────────────────────────${RST}"; }
 
+# ── Mode dry-run ──────────────────────────────────────────────────────────────
+run() {
+  if [[ "${DRYRUN:-0}" -eq 1 ]]; then
+    echo -e "${CYA}[dryrun]${RST} $*"
+  else
+    "$@"
+  fi
+}
+
 # ── Valeurs par défaut ────────────────────────────────────────────────────────
 MACOS_VERSION="ventura"          # sequoia | sonoma | ventura | monterey | big-sur
 DISK_SIZE="80G"
@@ -56,6 +65,7 @@ ${BLD}Options :${RST}
   --skip-ocs         Ne pas relancer OpCore Simplify (EFI déjà généré)
   --skip-recovery    Ne pas re-télécharger le Recovery
   --run-only         Lancer directement la VM (skips tout sauf launch)
+  --dryrun           Simuler toutes les étapes sans rien écrire ni installer
   --help             Afficher cette aide
 
 ${BLD}Exemples :${RST}
@@ -65,7 +75,7 @@ EOF
 exit 0
 }
 
-SKIP_DEPS=0; SKIP_OCS=0; SKIP_RECOVERY=0; RUN_ONLY=0
+SKIP_DEPS=0; SKIP_OCS=0; SKIP_RECOVERY=0; RUN_ONLY=0; DRYRUN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --macos)        MACOS_VERSION="$2"; shift 2 ;;
@@ -78,6 +88,7 @@ while [[ $# -gt 0 ]]; do
     --skip-ocs)     SKIP_OCS=1;         shift   ;;
     --skip-recovery)SKIP_RECOVERY=1;    shift   ;;
     --run-only)     RUN_ONLY=1;         shift   ;;
+    --dryrun)       DRYRUN=1;           shift   ;;
     --help|-h)      usage ;;
     *) die "Argument inconnu : $1. Lancez --help." ;;
   esac
@@ -110,7 +121,7 @@ check_os() {
   # Droits sur /dev/kvm
   if ! groups | grep -qE "kvm|virt"; then
     warn "L'utilisateur n'est pas dans le groupe 'kvm'. Ajout..."
-    usermod -aG kvm "$USER"
+    run usermod -aG kvm "$USER"
     warn "Reconnectez-vous pour que le changement soit effectif, ou lancez : newgrp kvm"
   else
     ok "Groupe KVM OK"
@@ -134,8 +145,8 @@ install_deps() {
     p7zip-full         # extraction archives macOS
   )
 
-  zypper --non-interactive refresh
-  zypper --non-interactive install --no-recommends "${PKGS[@]}" || \
+  run zypper --non-interactive refresh
+  run zypper --non-interactive install --no-recommends "${PKGS[@]}" || \
     warn "Certains paquets peuvent déjà être installés."
 
   ok "Dépendances installées"
@@ -184,22 +195,22 @@ run_opcore_simplify() {
 
   if [[ ! -d "${OCS_DIR}" ]]; then
     log "Clonage du dépôt OpCore Simplify (branche ${OCS_BRANCH})..."
-    git clone --branch "${OCS_BRANCH}" "${OCS_REPO}" "${OCS_DIR}"
+    run git clone --branch "${OCS_BRANCH}" "${OCS_REPO}" "${OCS_DIR}"
   else
     local CURRENT_BRANCH; CURRENT_BRANCH=$(git -C "${OCS_DIR}" rev-parse --abbrev-ref HEAD)
     if [[ "${CURRENT_BRANCH}" != "${OCS_BRANCH}" ]]; then
       warn "Branche actuelle '${CURRENT_BRANCH}' ≠ '${OCS_BRANCH}', basculement..."
-      git -C "${OCS_DIR}" fetch origin
-      git -C "${OCS_DIR}" checkout "${OCS_BRANCH}"
+      run git -C "${OCS_DIR}" fetch origin
+      run git -C "${OCS_DIR}" checkout "${OCS_BRANCH}"
     fi
     log "Mise à jour du dépôt OpCore Simplify..."
-    git -C "${OCS_DIR}" pull --ff-only origin "${OCS_BRANCH}" || warn "Mise à jour git échouée, version locale conservée."
+    run git -C "${OCS_DIR}" pull --ff-only origin "${OCS_BRANCH}" || warn "Mise à jour git échouée, version locale conservée."
   fi
   ok "Branche : ${OCS_BRANCH} @ $(git -C "${OCS_DIR}" rev-parse --short HEAD)"
 
   # Installer les dépendances Python
   if [[ -f "${OCS_DIR}/requirements.txt" ]]; then
-    pip3 install --quiet -r "${OCS_DIR}/requirements.txt"
+    run pip3 install --quiet -r "${OCS_DIR}/requirements.txt"
   fi
 
   # Patch VM : forcer le profil SMBIOS MacPro7,1 ou iMacPro1,1 adapté QEMU
@@ -243,6 +254,14 @@ EOF
 build_opencore_img() {
   sep; log "Construction de l'image OpenCore (ESP 200 Mo)..."
 
+  # En dryrun : simuler sans résolution EFI ni accès disque
+  if [[ "${DRYRUN:-0}" -eq 1 ]]; then
+    echo -e "${CYA}[dryrun]${RST} qemu-img create -f raw ${OPENCORE_IMG} 200M"
+    echo -e "${CYA}[dryrun]${RST} sgdisk + mkfs.fat + cp EFI → ${OPENCORE_IMG}"
+    ok "Image OpenCore simulée (dryrun)"
+    return 0
+  fi
+
   # ── Résoudre le chemin EFI (cache → recherche → saisie manuelle)
   local OCS_EFI_DIR=""
 
@@ -272,23 +291,25 @@ build_opencore_img() {
     echo "${OCS_EFI_DIR}" > "${VM_DIR}/.ocs_efi_path"
   fi
 
-  # Créer image FAT32 200 Mo
-  qemu-img create -f raw "${OPENCORE_IMG}" 200M
-  # Partition GPT + ESP
-  sgdisk -Z -n 1:2048:411647 -t 1:EF00 -c 1:"EFI" "${OPENCORE_IMG}"
+  # 220M = 450560 secteurs → partition 2048:-1 dans les limites
+  run qemu-img create -f raw "${OPENCORE_IMG}" 220M
+  # Table GPT + partition ESP en un seul appel (-Z -o puis -n 1:2048:-1)
+  run sgdisk -Z -o \
+    -n 1:2048:-1 -t 1:EF00 -c 1:"EFI System" \
+    "${OPENCORE_IMG}"
 
   # Monter via loop et formater
   local LOOP
   LOOP=$(losetup --find --partscan --show "${OPENCORE_IMG}")
-  mkfs.fat -F32 -n "EFI" "${LOOP}p1"
+  run mkfs.fat -F32 -n "EFI" "${LOOP}p1"
 
   local MNT; MNT=$(mktemp -d)
-  mount "${LOOP}p1" "${MNT}"
-  cp -r "${OCS_EFI_DIR}" "${MNT}/"
+  run mount "${LOOP}p1" "${MNT}"
+  run cp -r "${OCS_EFI_DIR}" "${MNT}/"
   sync
-  umount "${MNT}"
+  run umount "${MNT}"
   rmdir "${MNT}"
-  losetup -d "${LOOP}"
+  run losetup -d "${LOOP}"
 
   ok "Image OpenCore créée : ${OPENCORE_IMG}"
 }
@@ -351,7 +372,7 @@ create_macos_disk() {
     [[ "${CONFIRM,,}" == "o" ]] || { ok "Disque conservé."; return; }
   fi
 
-  qemu-img create -f qcow2 "${MACOS_DISK}" "${DISK_SIZE}"
+  run qemu-img create -f qcow2 "${MACOS_DISK}" "${DISK_SIZE}"
   ok "Disque créé : ${MACOS_DISK} (${DISK_SIZE})"
 }
 
@@ -543,6 +564,11 @@ build_opencore_img
 create_macos_disk
 generate_launch_script
 print_summary
+
+if [[ "${DRYRUN:-0}" -eq 1 ]]; then
+  ok "Dry-run terminé avec succès."
+  exit 0
+fi
 
 read -r -p "Lancer la VM maintenant ? [o/N] " START
 [[ "${START,,}" == "o" ]] && launch_vm || ok "VM prête. Lancez manuellement : bash ${VM_DIR}/run-macos.sh"

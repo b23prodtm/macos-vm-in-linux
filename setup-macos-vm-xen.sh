@@ -24,6 +24,16 @@ warn() { echo -e "${YEL}[!]${RST} $*"; }
 die()  { echo -e "${RED}[✘]${RST} $*" >&2; exit 1; }
 sep()  { echo -e "${CYA}────────────────────────────────────────────────────${RST}"; }
 
+# ── Mode dry-run ──────────────────────────────────────────────────────────────
+# En dryrun, les commandes destructives/lentes sont simulées
+run() {
+  if [[ "${DRYRUN:-0}" -eq 1 ]]; then
+    echo -e "${CYA}[dryrun]${RST} $*"
+  else
+    "$@"
+  fi
+}
+
 # ── Valeurs par défaut ────────────────────────────────────────────────────────
 MACOS_VERSION="ventura"   # sequoia | sonoma | ventura | monterey | big-sur
 DISK_SIZE="80G"
@@ -35,7 +45,7 @@ OCS_DIR="${HOME}/opcore-simplify"
 OCS_REPO="https://github.com/b23prodtm/OpCore-Simplify.git"
 OCS_BRANCH="fix/validator"
 
-SKIP_DEPS=0; SKIP_OCS=0; SKIP_RECOVERY=0; RUN_ONLY=0
+SKIP_DEPS=0; SKIP_OCS=0; SKIP_RECOVERY=0; RUN_ONLY=0; DRYRUN=0; SKIP_LIBVIRT=0
 
 usage() {
 cat <<EOF
@@ -52,7 +62,9 @@ ${BLD}Usage :${RST} $0 [OPTIONS]
   --skip-deps          Ne pas installer les paquets
   --skip-ocs           EFI déjà généré
   --skip-recovery      Ne pas re-télécharger le BaseSystem
+  --skip-libvirt       Ne pas enregistrer dans libvirt/virt-manager
   --run-only           Lancer la VM directement (xl create)
+  --dryrun             Simuler toutes les étapes sans rien écrire ni installer
   --help
 EOF
 exit 0
@@ -70,7 +82,9 @@ while [[ $# -gt 0 ]]; do
     --skip-deps)     SKIP_DEPS=1;        shift   ;;
     --skip-ocs)      SKIP_OCS=1;         shift   ;;
     --skip-recovery) SKIP_RECOVERY=1;    shift   ;;
+    --skip-libvirt)  SKIP_LIBVIRT=1;     shift   ;;
     --run-only)      RUN_ONLY=1;         shift   ;;
+    --dryrun)        DRYRUN=1;           shift   ;;
     --help|-h)       usage ;;
     *) die "Argument inconnu : $1" ;;
   esac
@@ -88,10 +102,12 @@ check_xen() {
   sep; log "Vérification de l'environnement Xen..."
 
   # dom0 ?
-  if [[ ! -d /proc/xen ]]; then
-    die "/proc/xen absent. Ce script doit tourner dans un dom0 Xen."
+  # XEN_PROC_DIR permet de surcharger /proc/xen (utile en CI/dryrun)
+  local XEN_DIR="${XEN_PROC_DIR:-/proc/xen}"
+  if [[ ! -d "${XEN_DIR}" ]]; then
+    die "${XEN_DIR} absent. Ce script doit tourner dans un dom0 Xen."
   fi
-  if ! grep -q "control_d" /proc/xen/capabilities 2>/dev/null; then
+  if ! grep -q "control_d" "${XEN_DIR}/capabilities" 2>/dev/null; then
     die "Pas en dom0 (capabilities ne contient pas 'control_d')."
   fi
   ok "Xen dom0 confirmé"
@@ -138,10 +154,10 @@ install_deps() {
     gdisk                  # sgdisk pour partitionner l'ESP
   )
 
-  zypper --non-interactive refresh
+  run zypper --non-interactive refresh
   # ovmf peut s'appeler différemment sur Tumbleweed
-  zypper --non-interactive install --no-recommends "${PKGS[@]}" 2>/dev/null || \
-  zypper --non-interactive install --no-recommends \
+  run zypper --non-interactive install --no-recommends "${PKGS[@]}" 2>/dev/null || \
+  run zypper --non-interactive install --no-recommends \
     xen-tools xen-libs qemu-x86 qemu-tools \
     python3 python3-pip git wget curl \
     dmidecode acpica p7zip-full gdisk || true
@@ -187,21 +203,21 @@ run_opcore_simplify() {
   sep; log "OpCore Simplify — génération EFI OpenCore..."
 
   if [[ ! -d "${OCS_DIR}" ]]; then
-    git clone --branch "${OCS_BRANCH}" "${OCS_REPO}" "${OCS_DIR}"
+    run git clone --branch "${OCS_BRANCH}" "${OCS_REPO}" "${OCS_DIR}"
   else
     local CURRENT_BRANCH; CURRENT_BRANCH=$(git -C "${OCS_DIR}" rev-parse --abbrev-ref HEAD)
     if [[ "${CURRENT_BRANCH}" != "${OCS_BRANCH}" ]]; then
       warn "Branche actuelle '${CURRENT_BRANCH}' ≠ '${OCS_BRANCH}', basculement..."
-      git -C "${OCS_DIR}" fetch origin
-      git -C "${OCS_DIR}" checkout "${OCS_BRANCH}"
+      run git -C "${OCS_DIR}" fetch origin
+      run git -C "${OCS_DIR}" checkout "${OCS_BRANCH}"
     fi
-    git -C "${OCS_DIR}" pull --ff-only origin "${OCS_BRANCH}" || \
+    run git -C "${OCS_DIR}" pull --ff-only origin "${OCS_BRANCH}" || \
       warn "git pull échoué, version locale conservée."
   fi
   ok "Branche : ${OCS_BRANCH} @ $(git -C "${OCS_DIR}" rev-parse --short HEAD)"
 
   [[ -f "${OCS_DIR}/requirements.txt" ]] && \
-    pip3 install --quiet -r "${OCS_DIR}/requirements.txt"
+    run pip3 install --quiet -r "${OCS_DIR}/requirements.txt"
 
   cat <<EOF
 
@@ -243,6 +259,39 @@ EOF
 build_opencore_img() {
   sep; log "Construction de l'image OpenCore (ESP 200 Mo)..."
 
+  # En dryrun : simuler sans résolution EFI ni accès disque
+  if [[ "${DRYRUN:-0}" -eq 1 ]]; then
+    echo -e "${CYA}[dryrun]${RST} qemu-img create -f raw ${OPENCORE_IMG} 220M"
+    echo -e "${CYA}[dryrun]${RST} sgdisk + mkfs.fat + cp EFI → ${OPENCORE_IMG}"
+    ok "Image OpenCore simulée (dryrun)"
+    return 0
+  fi
+
+  # ── Guard : image déjà construite → proposer de la conserver ──────────────
+  if [[ -f "${OPENCORE_IMG}" && -s "${OPENCORE_IMG}" ]]; then
+    warn "OpenCore.img existe déjà ($(du -h "${OPENCORE_IMG}" | cut -f1))."
+
+    # Libérer tout loop device orphelin tenant le fichier
+    local LOCKED_LOOPS
+    LOCKED_LOOPS=$(losetup -j "${OPENCORE_IMG}" 2>/dev/null | cut -d: -f1 || true)
+    if [[ -n "${LOCKED_LOOPS}" ]]; then
+      warn "Loop devices orphelins détectés : ${LOCKED_LOOPS}"
+      while IFS= read -r LOOP; do
+        losetup -d "${LOOP}" 2>/dev/null && warn "  Libéré : ${LOOP}" || true
+      done <<< "${LOCKED_LOOPS}"
+    fi
+
+    read -r -p "  Reconstruire (écrase l'image existante) ? [o/N] " REBUILD
+    if [[ "${REBUILD,,}" != "o" ]]; then
+      ok "Image OpenCore conservée."
+      return 0
+    fi
+    # Détacher tous les loop devices avant d'écraser
+    losetup -j "${OPENCORE_IMG}" 2>/dev/null | cut -d: -f1 | \
+      xargs -r -I{} losetup -d {} 2>/dev/null || true
+    rm -f "${OPENCORE_IMG}"
+  fi
+
   # ── Résoudre le chemin EFI (priorité : cache → recherche → saisie manuelle)
   local EFI_PATH=""
 
@@ -272,22 +321,25 @@ build_opencore_img() {
     echo "${EFI_PATH}" > "${VM_DIR}/.ocs_efi_path"
   fi
 
-  qemu-img create -f raw "${OPENCORE_IMG}" 200M
+  # 220M = 450560 secteurs → partition 2048:-1 dans les limites
+  run qemu-img create -f raw "${OPENCORE_IMG}" 220M
 
-  # Table GPT + partition ESP
-  sgdisk -Z "${OPENCORE_IMG}"
-  sgdisk -n 1:2048:411647 -t 1:EF00 -c 1:"EFI System" "${OPENCORE_IMG}"
+  # Table GPT + partition ESP en un seul appel sgdisk
+  # -Z : effacer, -o : nouvelle table GPT, -n 1:2048:-1 : jusqu'au dernier secteur
+  run sgdisk -Z -o \
+    -n 1:2048:-1 -t 1:EF00 -c 1:"EFI System" \
+    "${OPENCORE_IMG}"
 
   # Formater + copier via loop device
   local LOOP; LOOP=$(losetup --find --partscan --show "${OPENCORE_IMG}")
-  mkfs.fat -F32 -n "EFI" "${LOOP}p1"
+  run mkfs.fat -F32 -n "EFI" "${LOOP}p1"
 
   local MNT; MNT=$(mktemp -d)
-  mount "${LOOP}p1" "${MNT}"
-  cp -r "${EFI_PATH}" "${MNT}/"
+  run mount "${LOOP}p1" "${MNT}"
+  run cp -r "${EFI_PATH}" "${MNT}/"
   sync
-  umount "${MNT}"; rmdir "${MNT}"
-  losetup -d "${LOOP}"
+  run umount "${MNT}"; rmdir "${MNT}"
+  run losetup -d "${LOOP}"
 
   ok "OpenCore.img : ${OPENCORE_IMG}"
 }
@@ -334,7 +386,7 @@ create_macos_disk() {
     read -r -p "Recréer (efface les données) ? [o/N] " C
     [[ "${C,,}" == "o" ]] || { ok "Disque conservé."; return; }
   fi
-  qemu-img create -f qcow2 "${MACOS_DISK}" "${DISK_SIZE}"
+  run qemu-img create -f qcow2 "${MACOS_DISK}" "${DISK_SIZE}"
   ok "Disque : ${MACOS_DISK} (${DISK_SIZE})"
 }
 
@@ -375,11 +427,8 @@ memory      = ${RAM_MB}
 bios        = "ovmf"
 ${VARS_LINE}
 
-# ── CPU : présenter comme Intel (requis par macOS) ────────────
-cpuid = [
-    "0x00000001:ecx=0x00000000:ecx=~0x80000002",
-]
-# Désactiver APIC x2 (problèmes avec macOS dans certains Xen)
+# ── CPU : vendor Intel forcé via device_model_args_hvm (-cpu Penryn,vendor=GenuineIntel)
+# cpuid xl non utilisé : le format de masque (32 car. hex) est incompatible
 apic        = 1
 acpi        = 1
 hpet        = 1
@@ -388,10 +437,12 @@ hpet        = 1
 # sata.0 : OpenCore EFI (boot)
 # sata.1 : Disque macOS principal
 # sata.2 : BaseSystem Recovery
+# access=rw + snapshot=on : qemu-xen IDE ne supporte pas access=ro
+# snapshot=on protège le fichier source (écritures dans un overlay temporaire)
 disk = [
-    'format=raw,  vdev=hda, access=ro, target=${OPENCORE_IMG}',
-    'format=qcow2,vdev=hdb, access=rw, target=${MACOS_DISK}',
-    'format=raw,  vdev=hdc, access=ro, target=${RECOVERY_IMG}',
+    'format=raw,  vdev=hda, access=rw, target=${OPENCORE_IMG}',
+    'format=qcow2,vdev=hdb, access=rw,              target=${MACOS_DISK}',
+    'format=raw,  vdev=hdc, access=rw, target=${RECOVERY_IMG}',
 ]
 
 # ── Réseau ────────────────────────────────────────────────────
@@ -403,7 +454,7 @@ usbdevice   = ['tablet']
 # ── Affichage : VNC (headless / SSH tunnel) ───────────────────
 vnc         = 1
 vnclisten   = "127.0.0.1"
-vncport     = 5910
+vncport     = 5900
 vncpasswd   = ""
 # Alternative SDL (si Xorg local) :
 # sdl         = 1
@@ -436,23 +487,21 @@ memory      = ${RAM_MB}
 bios        = "ovmf"
 ${VARS_LINE}
 
-cpuid = [
-    "0x00000001:ecx=0x00000000:ecx=~0x80000002",
-]
+# cpuid : vendor Intel via device_model_args_hvm uniquement
 apic = 1
 acpi = 1
 hpet = 1
 
 disk = [
-    'format=raw,  vdev=hda, access=ro, target=${OPENCORE_IMG}',
-    'format=qcow2,vdev=hdb, access=rw, target=${MACOS_DISK}',
+    'format=raw,  vdev=hda, access=rw, target=${OPENCORE_IMG}',
+    'format=qcow2,vdev=hdb, access=rw,              target=${MACOS_DISK}',
 ]
 
 ${NET_LINE}
 usbdevice   = ['tablet']
 vnc         = 1
 vnclisten   = "127.0.0.1"
-vncport     = 5910
+vncport     = 5900
 vncpasswd   = ""
 
 device_model_version    = "qemu-xen"
@@ -465,6 +514,7 @@ device_model_args_hvm   = [
 on_poweroff = "destroy"
 on_reboot   = "restart"
 on_crash    = "preserve"
+serial      = "none"
 XL
 
   # Script wrapper de lancement
@@ -474,9 +524,9 @@ XL
 XLCFG="$(dirname "$0")/macos-install.xl"
 echo "[*] Démarrage VM macOS (mode installation) via xl..."
 xl create "${XLCFG}"
-echo "[*] Pour voir l'écran, connectez un client VNC sur localhost:5910"
-echo "    Exemple : vncviewer localhost:5910"
-echo "    Ou via SSH : ssh -L 5910:127.0.0.1:5910 user@dom0 puis vncviewer localhost:5910"
+echo "[*] Pour voir l'écran, connectez un client VNC sur localhost:5900"
+echo "    Exemple : vncviewer localhost:5900"
+echo "    Ou via SSH : ssh -L 5900:127.0.0.1:5900 user@dom0 puis vncviewer localhost:5900"
 SH
   chmod +x "${VM_DIR}/run-install.sh"
 
@@ -486,13 +536,169 @@ SH
 XLCFG="$(dirname "$0")/macos.xl"
 echo "[*] Démarrage VM macOS via xl..."
 xl create "${XLCFG}"
-echo "[*] VNC : vncviewer localhost:5910"
+echo "[*] VNC : vncviewer localhost:5900"
 SH
   chmod +x "${VM_DIR}/run.sh"
 
   ok "Configs xl générées :"
   ok "  Installation : ${VM_DIR}/macos-install.xl"
   ok "  Normal       : ${VM_DIR}/macos.xl"
+}
+
+# ── 9. Enregistrement libvirt (virt-manager) ──────────────────────────────────
+register_libvirt() {
+  sep; log "Enregistrement dans libvirt (virt-manager)..."
+
+  # Vérifier que libvirt+virsh sont disponibles
+  if ! command -v virsh &>/dev/null; then
+    warn "virsh introuvable — installation de libvirt..."
+    run zypper --non-interactive install --no-recommends \
+      libvirt libvirt-daemon-xen virt-manager virsh
+  fi
+
+  # S'assurer que le daemon libvirt tourne
+  # Sur Tumbleweed, le service peut s'appeler libvirtd, virtqemud ou virtxend
+  # et utilise l'activation par socket (libvirtd.socket)
+  local LIBVIRT_SVC=""
+  for svc in libvirtd virtqemud libvirtd.socket; do
+    if systemctl list-unit-files "${svc}" 2>/dev/null | grep -q "${svc}"; then
+      LIBVIRT_SVC="${svc}"
+      break
+    fi
+  done
+
+  if [[ -z "${LIBVIRT_SVC}" ]]; then
+    warn "Aucun service libvirt détecté — réinstallation..."
+    run zypper --non-interactive install --no-recommends \
+      libvirt libvirt-daemon-xen libvirt-client
+    # Redetect
+    for svc in libvirtd virtqemud libvirtd.socket; do
+      if systemctl list-unit-files "${svc}" 2>/dev/null | grep -q "${svc}"; then
+        LIBVIRT_SVC="${svc}"; break
+      fi
+    done
+  fi
+
+  if [[ -n "${LIBVIRT_SVC}" ]]; then
+    if ! systemctl is-active --quiet "${LIBVIRT_SVC}" 2>/dev/null; then
+      run systemctl enable --now "${LIBVIRT_SVC}"
+    fi
+    ok "Service libvirt : ${LIBVIRT_SVC}"
+  else
+    warn "Service libvirt introuvable même après installation — virsh peut quand même fonctionner via socket."
+  fi
+
+  if [[ "${DRYRUN:-0}" -eq 1 ]]; then
+    echo -e "${CYA}[dryrun]${RST} virsh -c xen:/// define ${VM_DIR}/macos-${MACOS_VERSION}.xml"
+    echo -e "${CYA}[dryrun]${RST} virsh -c xen:/// define ${VM_DIR}/macos-${MACOS_VERSION}-install.xml"
+    ok "Enregistrement libvirt simulé (dryrun)"
+    return 0
+  fi
+
+  # Générer le XML libvirt — mode normal
+  local NVRAM_LINE=""
+  [[ -f "${VM_DIR}/OVMF_VARS.fd" ]] && \
+    NVRAM_LINE="<nvram>${VM_DIR}/OVMF_VARS.fd</nvram>"
+
+  local NET_XML=""
+  if [[ -n "${BRIDGE}" ]]; then
+    NET_XML="<interface type='bridge'>
+      <source bridge='${BRIDGE}'/>
+      <model type='e1000'/>
+    </interface>"
+  fi
+
+  _write_libvirt_xml() {
+    local NAME="$1" XMLFILE="$2" WITH_RECOVERY="$3"
+    local RECOVERY_DISK=""
+    if [[ "${WITH_RECOVERY}" == "1" ]]; then
+      RECOVERY_DISK="
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='raw' cache='none'/>
+      <source file='${RECOVERY_IMG}'/>
+      <target dev='hdc' bus='ide'/>
+    </disk>"
+    fi
+
+    cat > "${XMLFILE}" <<XMLEOF
+<domain type='xen'>
+  <name>${NAME}</name>
+  <memory unit='MiB'>${RAM_MB}</memory>
+  <currentMemory unit='MiB'>${RAM_MB}</currentMemory>
+  <vcpu placement='static'>${CPU_CORES}</vcpu>
+
+  <os firmware='efi'>
+    <type arch='x86_64' machine='xenfv'>hvm</type>
+    <loader readonly='yes' type='pflash'>${OVMF_CODE}</loader>
+    ${NVRAM_LINE}
+    <boot dev='hd'/>
+  </os>
+
+  <features>
+    <apic/>
+    <acpi/>
+    <hap/>
+    <viridian/>
+  </features>
+
+  <cpu mode='host-passthrough'>
+    <topology sockets='1' cores='${CPU_CORES}' threads='1'/>
+  </cpu>
+
+  <clock offset='localtime'/>
+
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>preserve</on_crash>
+
+  <devices>
+    <!-- OpenCore EFI boot disk -->
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='raw' cache='none'/>
+      <source file='${OPENCORE_IMG}'/>
+      <target dev='hda' bus='ide'/>
+    </disk>
+
+    <!-- macOS main disk -->
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' cache='unsafe' discard='unmap'/>
+      <source file='${MACOS_DISK}'/>
+      <target dev='hdb' bus='ide'/>
+    </disk>
+    ${RECOVERY_DISK}
+
+    <!-- Réseau -->
+    ${NET_XML}
+
+    <!-- Input : ps2 mouse (tablet/usb non supporté par le driver Xen libvirt) -->
+    <!-- VNC gère clavier et souris nativement, pas besoin de device dédié -->
+    <input type='mouse' bus='ps2'/>
+
+    <!-- Affichage VNC -->
+    <graphics type='vnc' port='5900' listen='127.0.0.1' autoport='no'>
+      <listen type='address' address='127.0.0.1'/>
+    </graphics>
+    <video>
+      <model type='vga' vram='131072'/>
+    </video>
+
+    <!-- Audio : ich9 non supporté par Xen/libvirt → ac97 -->
+    <sound model='ac97'/>
+  </devices>
+</domain>
+XMLEOF
+  }
+
+  _write_libvirt_xml "macos-${MACOS_VERSION}"         "${VM_DIR}/macos-${MACOS_VERSION}.xml"         "0"
+  _write_libvirt_xml "macos-${MACOS_VERSION}-install" "${VM_DIR}/macos-${MACOS_VERSION}-install.xml" "1"
+
+  # Enregistrer dans libvirt via le driver Xen
+  virsh -c xen:/// define "${VM_DIR}/macos-${MACOS_VERSION}.xml"
+  virsh -c xen:/// define "${VM_DIR}/macos-${MACOS_VERSION}-install.xml"
+
+  ok "VM enregistrées dans libvirt (driver xen:///)"
+  ok "Ouvrez virt-manager → Fichier → Ajouter une connexion → Xen"
+  ok "ou : virt-manager --connect xen:///"
 }
 
 # ── 9. Résumé final ───────────────────────────────────────────────────────────
@@ -509,7 +715,7 @@ ${BLD}Bridge     :${RST}  ${BRIDGE:-"(aucun)"}
 
 ${BLD}${YEL}── Étape 1 : Installation macOS ──────────────────────────────${RST}
   xl create ${VM_DIR}/macos-install.xl
-  vncviewer localhost:5910
+  vncviewer localhost:5900
 
   Dans OpenCore picker :
     1. Sélectionner "Reset NVRAM" (1er démarrage uniquement)
@@ -519,7 +725,7 @@ ${BLD}${YEL}── Étape 1 : Installation macOS ──────────�
 
 ${BLD}${YEL}── Étape 2 : Après installation ──────────────────────────────${RST}
   xl create ${VM_DIR}/macos.xl
-  vncviewer localhost:5910
+  vncviewer localhost:5900
 
 ${BLD}${YEL}── Commandes xl utiles ────────────────────────────────────────${RST}
   xl list                        # VMs actives
@@ -529,8 +735,8 @@ ${BLD}${YEL}── Commandes xl utiles ─────────────�
 
 ${BLD}${YEL}── Si VNC distant (SSH tunnel) ────────────────────────────────${RST}
   # Sur votre poste local :
-  ssh -L 5910:127.0.0.1:5910 user@dom0-host
-  vncviewer localhost:5910
+  ssh -L 5900:127.0.0.1:5900 user@dom0-host
+  vncviewer localhost:5900
 
 EOF
   sep
@@ -539,7 +745,7 @@ EOF
 launch_vm() {
   sep; log "Lancement de la VM macOS (mode installation)..."
   xl create "${VM_DIR}/macos-install.xl"
-  log "VM démarrée. Connectez-vous via VNC : vncviewer localhost:5910"
+  log "VM démarrée. Connectez-vous via VNC : vncviewer localhost:5900"
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -563,7 +769,13 @@ build_opencore_img
 [[ "$SKIP_RECOVERY" -eq 0 ]] && download_recovery
 create_macos_disk
 generate_xl_config
+[[ "$SKIP_LIBVIRT" -eq 0 ]] && register_libvirt
 print_summary
+
+if [[ "${DRYRUN:-0}" -eq 1 ]]; then
+  ok "Dry-run terminé avec succès."
+  exit 0
+fi
 
 read -r -p "Lancer la VM maintenant (xl create) ? [o/N] " GO
 [[ "${GO,,}" == "o" ]] && launch_vm || ok "Lancez manuellement : bash ${VM_DIR}/run-install.sh"
