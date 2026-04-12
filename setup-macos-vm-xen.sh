@@ -590,5 +590,10 @@ create_macos_disk
 generate_xl_config
 print_summary
 
+if [[ "${DRYRUN:-0}" -eq 1 ]]; then
+  ok "Dry-run terminé avec succès."
+  exit 0
+fi
+
 read -r -p "Lancer la VM maintenant (xl create) ? [o/N] " GO
 [[ "${GO,,}" == "o" ]] && launch_vm || ok "Lancez manuellement : bash ${VM_DIR}/run-install.sh"
