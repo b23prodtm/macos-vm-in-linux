@@ -604,7 +604,7 @@ register_libvirt() {
 
   <os firmware='efi'>
     <type arch='x86_64' machine='xenfv'>hvm</type>
-    <loader readonly='no' type='pflash'>${OVMF_CODE}</loader>
+    <loader readonly='yes' type='pflash'>${OVMF_CODE}</loader>
     ${NVRAM_LINE}
     <boot dev='hd'/>
   </os>
