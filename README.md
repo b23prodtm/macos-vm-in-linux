@@ -185,6 +185,13 @@ sudo modprobe kvm_intel   # ou kvm_amd
 
 ## Dépannage
 
+### Redémarrage de la VM
+
+```
+cd ~/VMs/macos-ventura
+bash vm.sh kill && bash vm.sh restart && bash vm.sh vnc
+```
+
 ### Écran noir au démarrage
 
 ```
@@ -241,6 +248,8 @@ cd ~/opcore-simplify && python3 main.py
 
 # Reconstruire uniquement l'image OpenCore
 bash setup-macos-vm.sh --macos ventura --skip-deps --skip-recovery
+bash setup-macos-vm.sh --macos ventura --skip-deps --skip-recovery --skip-ocs
+
 ```
 
 ---

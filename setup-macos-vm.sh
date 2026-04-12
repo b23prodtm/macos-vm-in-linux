@@ -7,10 +7,19 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# ── Vérification root ─────────────────────────────────────────────────────────
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo -e "\033[0;31m[✘]\033[0m Ce script doit être exécuté en root : bash $0 $*"
-  exit 1
+# ── Mode rootless : détection sudo ───────────────────────────────────────────
+# Le script peut tourner en tant qu'utilisateur normal.
+# Les commandes nécessitant des droits élevés utilisent $SUDO automatiquement.
+if [[ "$(id -u)" -eq 0 ]]; then
+  SUDO=""
+else
+  if command -v sudo &>/dev/null; then
+    SUDO="sudo"
+    echo -e "\033[1;33m[!]\033[0m Mode rootless : les commandes privilégiées utiliseront sudo."
+  else
+    echo -e "\033[0;31m[✘]\033[0m sudo introuvable et vous n'êtes pas root. Installez sudo ou relancez en root."
+    exit 1
+  fi
 fi
 
 # ── Couleurs ──────────────────────────────────────────────────────────────────
@@ -121,7 +130,7 @@ check_os() {
   # Droits sur /dev/kvm
   if ! groups | grep -qE "kvm|virt"; then
     warn "L'utilisateur n'est pas dans le groupe 'kvm'. Ajout..."
-    run usermod -aG kvm "$USER"
+    run $SUDO usermod -aG kvm "$USER"
     warn "Reconnectez-vous pour que le changement soit effectif, ou lancez : newgrp kvm"
   else
     ok "Groupe KVM OK"
@@ -145,8 +154,8 @@ install_deps() {
     p7zip-full         # extraction archives macOS
   )
 
-  run zypper --non-interactive refresh
-  run zypper --non-interactive install --no-recommends "${PKGS[@]}" || \
+  run $SUDO zypper --non-interactive refresh
+  run $SUDO zypper --non-interactive install --no-recommends "${PKGS[@]}" || \
     warn "Certains paquets peuvent déjà être installés."
 
   ok "Dépendances installées"
@@ -182,7 +191,8 @@ prepare_dirs() {
   mkdir -p "${VM_DIR}"
   # Copie locale des VARS OVMF (modifiable par la VM)
   if [[ ! -f "${VM_DIR}/OVMF_VARS.fd" ]]; then
-    cp "${OVMF_VARS}" "${VM_DIR}/OVMF_VARS.fd"
+    $SUDO cp "${OVMF_VARS}" "${VM_DIR}/OVMF_VARS.fd"
+    $SUDO chown "$USER" "${VM_DIR}/OVMF_VARS.fd" 2>/dev/null || true
     ok "OVMF_VARS copié dans ${VM_DIR}/"
   else
     ok "OVMF_VARS déjà présent"
@@ -294,22 +304,22 @@ build_opencore_img() {
   # 220M = 450560 secteurs → partition 2048:-1 dans les limites
   run qemu-img create -f raw "${OPENCORE_IMG}" 220M
   # Table GPT + partition ESP en un seul appel (-Z -o puis -n 1:2048:-1)
-  run sgdisk -Z -o \
+  run $SUDO sgdisk -Z -o \
     -n 1:2048:-1 -t 1:EF00 -c 1:"EFI System" \
     "${OPENCORE_IMG}"
 
   # Monter via loop et formater
   local LOOP
-  LOOP=$(losetup --find --partscan --show "${OPENCORE_IMG}")
-  run mkfs.fat -F32 -n "EFI" "${LOOP}p1"
+  LOOP=$($SUDO losetup --find --partscan --show "${OPENCORE_IMG}")
+  run $SUDO mkfs.fat -F32 -n "EFI" "${LOOP}p1"
 
   local MNT; MNT=$(mktemp -d)
-  run mount "${LOOP}p1" "${MNT}"
-  run cp -r "${OCS_EFI_DIR}" "${MNT}/"
+  run $SUDO mount "${LOOP}p1" "${MNT}"
+  run $SUDO cp -r "${OCS_EFI_DIR}" "${MNT}/"
   sync
-  run umount "${MNT}"
+  run $SUDO umount "${MNT}"
   rmdir "${MNT}"
-  run losetup -d "${LOOP}"
+  run $SUDO losetup -d "${LOOP}"
 
   ok "Image OpenCore créée : ${OPENCORE_IMG}"
 }
