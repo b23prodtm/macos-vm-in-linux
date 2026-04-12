@@ -9,28 +9,6 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# ── OPTIMIZED: Calcul dynamique de RAM et CPU ────────────────────────────────
-calculate_resources() {
-  # Récupérer mémoire totale du système (en Mo)
-  local TOTAL_RAM_MB
-  TOTAL_RAM_MB=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
-  
-  # Récupérer nombre de CPU
-  local TOTAL_CPUS
-  TOTAL_CPUS=$(nproc)
-  
-  # 80% RAM pour la VM (par défaut)
-  RAM_MB=$(( (TOTAL_RAM_MB * 80) / 100 ))
-  
-  # 100% des cores pour la VM (par défaut)
-  CPU_CORES=${TOTAL_CPUS}
-  
-  if [[ -n "${LOG_PREFIX:-}" ]]; then
-    echo -e "${GRN}[✔]${RST} Système détecté: ${TOTAL_RAM_MB}MB RAM, ${TOTAL_CPUS} CPU(s)"
-    echo -e "${GRN}[✔]${RST} Allocation VM (défaut): ${RAM_MB}MB RAM (80%), ${CPU_CORES} CPU(s) (100%)"
-  fi
-}
-
 # ── Mode rootless : détection sudo ───────────────────────────────────────────
 # Le script peut tourner en tant qu'utilisateur normal.
 # Les commandes nécessitant des droits élevés utilisent $SUDO automatiquement.
@@ -55,6 +33,28 @@ warn() { echo -e "${YEL}[!]${RST} $*"; }
 die()  { echo -e "${RED}[✘]${RST} $*" >&2; exit 1; }
 sep()  { echo -e "${CYA}────────────────────────────────────────────────────${RST}"; }
 
+# ── OPTIMIZED: Calcul dynamique de RAM et CPU ────────────────────────────────
+# Appelée après la définition des couleurs pour affichage correct
+calculate_resources() {
+  local TOTAL_RAM_MB TOTAL_CPUS
+  TOTAL_RAM_MB=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
+  TOTAL_CPUS=$(nproc)
+  ok "Système détecté : ${TOTAL_RAM_MB} Mo RAM, ${TOTAL_CPUS} CPU(s)"
+  # Ne pas écraser si --ram/--cores passés manuellement
+  if [[ "${RAM_OVERRIDE:-0}" -eq 0 ]]; then
+    RAM_MB=$(( (TOTAL_RAM_MB * 80) / 100 ))
+    ok "RAM VM (80% auto) : ${RAM_MB} Mo"
+  else
+    ok "RAM VM (manuel)   : ${RAM_MB} Mo"
+  fi
+  if [[ "${CORES_OVERRIDE:-0}" -eq 0 ]]; then
+    CPU_CORES=${TOTAL_CPUS}
+    ok "CPUs VM (100% auto) : ${CPU_CORES}"
+  else
+    ok "CPUs VM (manuel)    : ${CPU_CORES}"
+  fi
+}
+
 # ── Mode dry-run ──────────────────────────────────────────────────────────────
 # En dryrun, les commandes destructives/lentes sont simulées
 run() {
@@ -68,17 +68,16 @@ run() {
 # ── Valeurs par défaut (calculées dynamiquement) ──────────────────────────────
 MACOS_VERSION="ventura"   # sequoia | sonoma | ventura | monterey | big-sur
 DISK_SIZE="80G"
+RAM_MB=8192               # valeur initiale — écrasée par calculate_resources()
+CPU_CORES=4               # valeur initiale — écrasée par calculate_resources()
 BRIDGE="xenbr0"           # bridge réseau Xen ; fallback virbr0
 VM_DIR="${HOME}/VMs/macos-${MACOS_VERSION}"
 OCS_DIR="${HOME}/opcore-simplify"
 OCS_REPO="https://github.com/b23prodtm/OpCore-Simplify.git"
 OCS_BRANCH="fix/validator"
 
-SKIP_DEPS=0; SKIP_OCS=0; SKIP_RECOVERY=0; RUN_ONLY=0; DRYRUN=0; SKIP_LIBVIRT=0
-
-# Calculer les ressources (avant parsing args) — OPTIMIZED
-LOG_PREFIX=1
-calculate_resources
+SKIP_DEPS=0; SKIP_OCS=0; SKIP_RECOVERY=0; RUN_ONLY=0; DRYRUN=0; SKIP_LIBVIRT=0; FORCE_REBUILD=0
+RAM_OVERRIDE=0; CORES_OVERRIDE=0
 
 usage() {
 cat <<EOF
@@ -96,6 +95,7 @@ ${BLD}Usage :${RST} $0 [OPTIONS]
   --skip-ocs           EFI déjà généré
   --skip-recovery      Ne pas re-télécharger le BaseSystem
   --skip-libvirt       Ne pas enregistrer dans libvirt/virt-manager
+  --force-rebuild      Reconstruire OpenCore.img sans demander confirmation
   --run-only           Lancer la VM directement ($SUDO xl create)
   --dryrun             Simuler toutes les étapes sans rien écrire ni installer
   --help
@@ -107,8 +107,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --macos)         MACOS_VERSION="$2"; shift 2 ;;
     --disk-size)     DISK_SIZE="$2";     shift 2 ;;
-    --ram)           RAM_MB="$2";        shift 2 ;;
-    --cores)         CPU_CORES="$2";     shift 2 ;;
+    --ram)           RAM_MB="$2"; RAM_OVERRIDE=1;   shift 2 ;;
+    --cores)         CPU_CORES="$2"; CORES_OVERRIDE=1; shift 2 ;;
     --bridge)        BRIDGE="$2";        shift 2 ;;
     --vm-dir)        VM_DIR="$2";        shift 2 ;;
     --ocs-dir)       OCS_DIR="$2";       shift 2 ;;
@@ -116,6 +116,7 @@ while [[ $# -gt 0 ]]; do
     --skip-ocs)      SKIP_OCS=1;         shift   ;;
     --skip-recovery) SKIP_RECOVERY=1;    shift   ;;
     --skip-libvirt)  SKIP_LIBVIRT=1;     shift   ;;
+    --force-rebuild) FORCE_REBUILD=1;    shift   ;;
     --run-only)      RUN_ONLY=1;         shift   ;;
     --dryrun)        DRYRUN=1;           shift   ;;
     --help|-h)       usage ;;
@@ -315,10 +316,14 @@ build_opencore_img() {
       done <<< "${LOCKED_LOOPS}"
     fi
 
-    read -r -p "  Reconstruire (écrase l'image existante) ? [o/N] " REBUILD
-    if [[ "${REBUILD,,}" != "o" ]]; then
-      ok "Image OpenCore conservée."
-      return 0
+    if [[ "${FORCE_REBUILD:-0}" -eq 1 ]]; then
+      warn "Force rebuild demandé (--force-rebuild)."
+    else
+      read -r -p "  Reconstruire (écrase l'image existante) ? [o/N] " REBUILD
+      if [[ "${REBUILD,,}" != "o" ]]; then
+        ok "Image OpenCore conservée."
+        return 0
+      fi
     fi
     # Détacher tous les loop devices avant d'écraser
     $SUDO losetup -j "${OPENCORE_IMG}" 2>/dev/null | cut -d: -f1 | \
@@ -1057,7 +1062,9 @@ launch_vm() {
 sep
 echo -e "${BLD}  macOS VM Setup — openSUSE Tumbleweed + Xen HVM${RST}"
 echo -e "${BLD}  Version macOS : ${CYA}${MACOS_VERSION}${RST}"
-echo -e "${BLD}  Ressources : ${CYA}${RAM_MB}MB RAM (80% système), ${CPU_CORES} CPU (100% système)${RST}"
+sep
+# Calculer les ressources système si non surchargées par --ram/--cores
+calculate_resources
 sep
 
 if [[ "$RUN_ONLY" -eq 1 ]]; then
