@@ -582,19 +582,6 @@ on_crash    = "preserve"
 serial      = "none"
 XL
 
-  # Rétrocompatibilité : run-install.sh et run.sh délèguent à vm.sh
-  cat > "${VM_DIR}/run-install.sh" <<'SH'
-#!/usr/bin/env bash
-exec "$(dirname "$0")/vm.sh" start-install "$@"
-SH
-  chmod +x "${VM_DIR}/run-install.sh"
-
-  cat > "${VM_DIR}/run.sh" <<'SH'
-#!/usr/bin/env bash
-exec "$(dirname "$0")/vm.sh" start "$@"
-SH
-  chmod +x "${VM_DIR}/run.sh"
-
   # ── Script de gestion complet vm.sh ───────────────────────────
   cat > "${VM_DIR}/vm.sh" <<VMSH
 #!/usr/bin/env bash

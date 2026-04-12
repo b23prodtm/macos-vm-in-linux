@@ -9,7 +9,7 @@
 
 ## 1. SCRIPT CHANGES (Already Applied)
 
-### Changed in `setup-macos-vm-xen.sh`:
+### Changed in `setup-macos-vm-xen-optimized.sh`:
 
 | Parameter | Before | After | Impact |
 |-----------|--------|-------|--------|
