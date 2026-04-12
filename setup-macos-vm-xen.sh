@@ -9,6 +9,28 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# ── OPTIMIZED: Calcul dynamique de RAM et CPU ────────────────────────────────
+calculate_resources() {
+  # Récupérer mémoire totale du système (en Mo)
+  local TOTAL_RAM_MB
+  TOTAL_RAM_MB=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
+  
+  # Récupérer nombre de CPU
+  local TOTAL_CPUS
+  TOTAL_CPUS=$(nproc)
+  
+  # 80% RAM pour la VM (par défaut)
+  RAM_MB=$(( (TOTAL_RAM_MB * 80) / 100 ))
+  
+  # 100% des cores pour la VM (par défaut)
+  CPU_CORES=${TOTAL_CPUS}
+  
+  if [[ -n "${LOG_PREFIX:-}" ]]; then
+    echo -e "${GRN}[✔]${RST} Système détecté: ${TOTAL_RAM_MB}MB RAM, ${TOTAL_CPUS} CPU(s)"
+    echo -e "${GRN}[✔]${RST} Allocation VM (défaut): ${RAM_MB}MB RAM (80%), ${CPU_CORES} CPU(s) (100%)"
+  fi
+}
+
 # ── Mode rootless : détection sudo ───────────────────────────────────────────
 # Le script peut tourner en tant qu'utilisateur normal.
 # Les commandes nécessitant des droits élevés utilisent $SUDO automatiquement.
@@ -43,11 +65,9 @@ run() {
   fi
 }
 
-# ── Valeurs par défaut ────────────────────────────────────────────────────────
+# ── Valeurs par défaut (calculées dynamiquement) ──────────────────────────────
 MACOS_VERSION="ventura"   # sequoia | sonoma | ventura | monterey | big-sur
 DISK_SIZE="80G"
-RAM_MB=8192               # en Mo (Xen utilise des Mo)
-CPU_CORES=4
 BRIDGE="xenbr0"           # bridge réseau Xen ; fallback virbr0
 VM_DIR="${HOME}/VMs/macos-${MACOS_VERSION}"
 OCS_DIR="${HOME}/opcore-simplify"
@@ -56,6 +76,10 @@ OCS_BRANCH="fix/validator"
 
 SKIP_DEPS=0; SKIP_OCS=0; SKIP_RECOVERY=0; RUN_ONLY=0; DRYRUN=0; SKIP_LIBVIRT=0
 
+# Calculer les ressources (avant parsing args) — OPTIMIZED
+LOG_PREFIX=1
+calculate_resources
+
 usage() {
 cat <<EOF
 ${BLD}Usage :${RST} $0 [OPTIONS]
@@ -63,8 +87,8 @@ ${BLD}Usage :${RST} $0 [OPTIONS]
   --macos VERSION      Version cible (défaut: ventura)
                        sequoia | sonoma | ventura | monterey | big-sur
   --disk-size SIZE     Taille disque (défaut: 80G)
-  --ram MB             RAM en Mo (défaut: 8192)
-  --cores N            vCPUs (défaut: 4)
+  --ram MB             RAM en Mo (défaut: 80% du système — auto-détecté)
+  --cores N            vCPUs (défaut: 100% du système — auto-détecté)
   --bridge BRIDGE      Bridge réseau (défaut: xenbr0)
   --vm-dir PATH        Répertoire VM
   --ocs-dir PATH       Répertoire OpCore Simplify
@@ -924,16 +948,16 @@ register_libvirt() {
   <on_crash>preserve</on_crash>
 
   <devices>
-    <!-- OpenCore EFI boot disk -->
+    <!-- OpenCore EFI boot disk — OPTIMIZED: cache=writeback pour UEFI rapide -->
     <disk type='file' device='disk'>
-      <driver name='qemu' type='raw' cache='none'/>
+      <driver name='qemu' type='raw' cache='writeback'/>
       <source file='${OPENCORE_IMG}'/>
       <target dev='hda' bus='ide'/>
     </disk>
 
-    <!-- macOS main disk -->
+    <!-- macOS main disk — OPTIMIZED: cache=writeback pour I/O rapide -->
     <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2' cache='unsafe' discard='unmap'/>
+      <driver name='qemu' type='qcow2' cache='writeback' discard='unmap'/>
       <source file='${MACOS_DISK}'/>
       <target dev='hdb' bus='ide'/>
     </disk>
@@ -954,8 +978,8 @@ register_libvirt() {
       <model type='vga' vram='131072'/>
     </video>
 
-    <!-- Audio : ich9 non supporté par Xen/libvirt → ac97 -->
-    <sound model='ac97'/>
+    <!-- Audio DISABLED — OPTIMIZED: Pas audio pour boot rapide en VM headless -->
+    <!-- <sound model='ac97'/> -->
   </devices>
 </domain>
 XMLEOF
@@ -981,8 +1005,8 @@ print_summary() {
   cat <<EOF
 
 ${BLD}Répertoire :${RST}  ${VM_DIR}
-${BLD}RAM        :${RST}  ${RAM_MB} Mo
-${BLD}CPUs       :${RST}  ${CPU_CORES}
+${BLD}RAM        :${RST}  ${RAM_MB} Mo (80% du système)
+${BLD}CPUs       :${RST}  ${CPU_CORES} (100% du système)
 ${BLD}Bridge     :${RST}  ${BRIDGE:-"(aucun)"}
 
 ${BLD}${YEL}── Étape 1 : Installation macOS ──────────────────────────────${RST}
@@ -1033,6 +1057,7 @@ launch_vm() {
 sep
 echo -e "${BLD}  macOS VM Setup — openSUSE Tumbleweed + Xen HVM${RST}"
 echo -e "${BLD}  Version macOS : ${CYA}${MACOS_VERSION}${RST}"
+echo -e "${BLD}  Ressources : ${CYA}${RAM_MB}MB RAM (80% système), ${CPU_CORES} CPU (100% système)${RST}"
 sep
 
 if [[ "$RUN_ONLY" -eq 1 ]]; then
