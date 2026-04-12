@@ -646,9 +646,9 @@ register_libvirt() {
     <!-- Réseau -->
     ${NET_XML}
 
-    <!-- USB tablet pour la souris -->
-    <input type='tablet' bus='usb'/>
-    <input type='keyboard' bus='usb'/>
+    <!-- Input : ps2 mouse (tablet/usb non supporté par le driver Xen libvirt) -->
+    <!-- VNC gère clavier et souris nativement, pas besoin de device dédié -->
+    <input type='mouse' bus='ps2'/>
 
     <!-- Affichage VNC -->
     <graphics type='vnc' port='5910' listen='127.0.0.1' autoport='no'>
