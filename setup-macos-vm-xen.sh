@@ -531,8 +531,35 @@ register_libvirt() {
   fi
 
   # S'assurer que le daemon libvirt tourne
-  if ! systemctl is-active --quiet libvirtd 2>/dev/null; then
-    run systemctl enable --now libvirtd
+  # Sur Tumbleweed, le service peut s'appeler libvirtd, virtqemud ou virtxend
+  # et utilise l'activation par socket (libvirtd.socket)
+  local LIBVIRT_SVC=""
+  for svc in libvirtd virtqemud libvirtd.socket; do
+    if systemctl list-unit-files "${svc}" 2>/dev/null | grep -q "${svc}"; then
+      LIBVIRT_SVC="${svc}"
+      break
+    fi
+  done
+
+  if [[ -z "${LIBVIRT_SVC}" ]]; then
+    warn "Aucun service libvirt détecté — réinstallation..."
+    run zypper --non-interactive install --no-recommends \
+      libvirt libvirt-daemon-xen libvirt-client
+    # Redetect
+    for svc in libvirtd virtqemud libvirtd.socket; do
+      if systemctl list-unit-files "${svc}" 2>/dev/null | grep -q "${svc}"; then
+        LIBVIRT_SVC="${svc}"; break
+      fi
+    done
+  fi
+
+  if [[ -n "${LIBVIRT_SVC}" ]]; then
+    if ! systemctl is-active --quiet "${LIBVIRT_SVC}" 2>/dev/null; then
+      run systemctl enable --now "${LIBVIRT_SVC}"
+    fi
+    ok "Service libvirt : ${LIBVIRT_SVC}"
+  else
+    warn "Service libvirt introuvable même après installation — virsh peut quand même fonctionner via socket."
   fi
 
   if [[ "${DRYRUN:-0}" -eq 1 ]]; then
