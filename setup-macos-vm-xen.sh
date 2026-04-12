@@ -400,11 +400,8 @@ memory      = ${RAM_MB}
 bios        = "ovmf"
 ${VARS_LINE}
 
-# ── CPU : présenter comme Intel (requis par macOS) ────────────
-cpuid = [
-    "0x00000001:ecx=0x00000000:ecx=~0x80000002",
-]
-# Désactiver APIC x2 (problèmes avec macOS dans certains Xen)
+# ── CPU : vendor Intel forcé via device_model_args_hvm (-cpu Penryn,vendor=GenuineIntel)
+# cpuid xl non utilisé : le format de masque (32 car. hex) est incompatible
 apic        = 1
 acpi        = 1
 hpet        = 1
@@ -413,10 +410,12 @@ hpet        = 1
 # sata.0 : OpenCore EFI (boot)
 # sata.1 : Disque macOS principal
 # sata.2 : BaseSystem Recovery
+# access=rw + snapshot=on : qemu-xen IDE ne supporte pas access=ro
+# snapshot=on protège le fichier source (écritures dans un overlay temporaire)
 disk = [
-    'format=raw,  vdev=hda, access=ro, target=${OPENCORE_IMG}',
-    'format=qcow2,vdev=hdb, access=rw, target=${MACOS_DISK}',
-    'format=raw,  vdev=hdc, access=ro, target=${RECOVERY_IMG}',
+    'format=raw,  vdev=hda, access=rw, snapshot=on, target=${OPENCORE_IMG}',
+    'format=qcow2,vdev=hdb, access=rw,              target=${MACOS_DISK}',
+    'format=raw,  vdev=hdc, access=rw, snapshot=on, target=${RECOVERY_IMG}',
 ]
 
 # ── Réseau ────────────────────────────────────────────────────
@@ -461,16 +460,14 @@ memory      = ${RAM_MB}
 bios        = "ovmf"
 ${VARS_LINE}
 
-cpuid = [
-    "0x00000001:ecx=0x00000000:ecx=~0x80000002",
-]
+# cpuid : vendor Intel via device_model_args_hvm uniquement
 apic = 1
 acpi = 1
 hpet = 1
 
 disk = [
-    'format=raw,  vdev=hda, access=ro, target=${OPENCORE_IMG}',
-    'format=qcow2,vdev=hdb, access=rw, target=${MACOS_DISK}',
+    'format=raw,  vdev=hda, access=rw, snapshot=on, target=${OPENCORE_IMG}',
+    'format=qcow2,vdev=hdb, access=rw,              target=${MACOS_DISK}',
 ]
 
 ${NET_LINE}
