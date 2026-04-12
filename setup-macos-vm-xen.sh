@@ -9,6 +9,28 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# ── OPTIMIZED: Calcul dynamique de RAM et CPU ────────────────────────────────
+calculate_resources() {
+  # Récupérer mémoire totale du système (en Mo)
+  local TOTAL_RAM_MB
+  TOTAL_RAM_MB=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
+  
+  # Récupérer nombre de CPU
+  local TOTAL_CPUS
+  TOTAL_CPUS=$(nproc)
+  
+  # 80% RAM pour la VM (par défaut)
+  RAM_MB=$(( (TOTAL_RAM_MB * 80) / 100 ))
+  
+  # 100% des cores pour la VM (par défaut)
+  CPU_CORES=${TOTAL_CPUS}
+  
+  if [[ -n "${LOG_PREFIX:-}" ]]; then
+    echo -e "${GRN}[✔]${RST} Système détecté: ${TOTAL_RAM_MB}MB RAM, ${TOTAL_CPUS} CPU(s)"
+    echo -e "${GRN}[✔]${RST} Allocation VM (défaut): ${RAM_MB}MB RAM (80%), ${CPU_CORES} CPU(s) (100%)"
+  fi
+}
+
 # ── Mode rootless : détection sudo ───────────────────────────────────────────
 # Le script peut tourner en tant qu'utilisateur normal.
 # Les commandes nécessitant des droits élevés utilisent $SUDO automatiquement.
@@ -78,6 +100,10 @@ OCS_BRANCH="fix/validator"
 
 SKIP_DEPS=0; SKIP_OCS=0; SKIP_RECOVERY=0; RUN_ONLY=0; DRYRUN=0; SKIP_LIBVIRT=0; FORCE_REBUILD=0
 RAM_OVERRIDE=0; CORES_OVERRIDE=0
+
+# Calculer les ressources (avant parsing args) — OPTIMIZED
+LOG_PREFIX=1
+calculate_resources
 
 usage() {
 cat <<EOF
@@ -1110,6 +1136,7 @@ launch_vm() {
 sep
 echo -e "${BLD}  macOS VM Setup — openSUSE Tumbleweed + Xen HVM${RST}"
 echo -e "${BLD}  Version macOS : ${CYA}${MACOS_VERSION}${RST}"
+echo -e "${BLD}  Ressources : ${CYA}${RAM_MB}MB RAM (80% système), ${CPU_CORES} CPU (100% système)${RST}"
 sep
 # Calculer les ressources système si non surchargées par --ram/--cores
 calculate_resources
