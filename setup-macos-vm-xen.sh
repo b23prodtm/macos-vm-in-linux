@@ -261,10 +261,35 @@ build_opencore_img() {
 
   # En dryrun : simuler sans résolution EFI ni accès disque
   if [[ "${DRYRUN:-0}" -eq 1 ]]; then
-    echo -e "${CYA}[dryrun]${RST} qemu-img create -f raw ${OPENCORE_IMG} 200M"
+    echo -e "${CYA}[dryrun]${RST} qemu-img create -f raw ${OPENCORE_IMG} 220M"
     echo -e "${CYA}[dryrun]${RST} sgdisk + mkfs.fat + cp EFI → ${OPENCORE_IMG}"
     ok "Image OpenCore simulée (dryrun)"
     return 0
+  fi
+
+  # ── Guard : image déjà construite → proposer de la conserver ──────────────
+  if [[ -f "${OPENCORE_IMG}" && -s "${OPENCORE_IMG}" ]]; then
+    warn "OpenCore.img existe déjà ($(du -h "${OPENCORE_IMG}" | cut -f1))."
+
+    # Libérer tout loop device orphelin tenant le fichier
+    local LOCKED_LOOPS
+    LOCKED_LOOPS=$(losetup -j "${OPENCORE_IMG}" 2>/dev/null | cut -d: -f1 || true)
+    if [[ -n "${LOCKED_LOOPS}" ]]; then
+      warn "Loop devices orphelins détectés : ${LOCKED_LOOPS}"
+      while IFS= read -r LOOP; do
+        losetup -d "${LOOP}" 2>/dev/null && warn "  Libéré : ${LOOP}" || true
+      done <<< "${LOCKED_LOOPS}"
+    fi
+
+    read -r -p "  Reconstruire (écrase l'image existante) ? [o/N] " REBUILD
+    if [[ "${REBUILD,,}" != "o" ]]; then
+      ok "Image OpenCore conservée."
+      return 0
+    fi
+    # Détacher tous les loop devices avant d'écraser
+    losetup -j "${OPENCORE_IMG}" 2>/dev/null | cut -d: -f1 | \
+      xargs -r -I{} losetup -d {} 2>/dev/null || true
+    rm -f "${OPENCORE_IMG}"
   fi
 
   # ── Résoudre le chemin EFI (priorité : cache → recherche → saisie manuelle)
