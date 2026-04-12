@@ -254,6 +254,14 @@ EOF
 build_opencore_img() {
   sep; log "Construction de l'image OpenCore (ESP 200 Mo)..."
 
+  # En dryrun : simuler sans résolution EFI ni accès disque
+  if [[ "${DRYRUN:-0}" -eq 1 ]]; then
+    echo -e "${CYA}[dryrun]${RST} qemu-img create -f raw ${OPENCORE_IMG} 200M"
+    echo -e "${CYA}[dryrun]${RST} sgdisk + mkfs.fat + cp EFI → ${OPENCORE_IMG}"
+    ok "Image OpenCore simulée (dryrun)"
+    return 0
+  fi
+
   # ── Résoudre le chemin EFI (cache → recherche → saisie manuelle)
   local OCS_EFI_DIR=""
 
