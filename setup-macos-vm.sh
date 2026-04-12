@@ -291,10 +291,12 @@ build_opencore_img() {
     echo "${OCS_EFI_DIR}" > "${VM_DIR}/.ocs_efi_path"
   fi
 
-  # Créer image FAT32 200 Mo
-  run qemu-img create -f raw "${OPENCORE_IMG}" 200M
-  # Partition GPT + ESP
-  run sgdisk -Z -n 1:2048:411647 -t 1:EF00 -c 1:"EFI" "${OPENCORE_IMG}"
+  # 220M = 450560 secteurs → partition 2048:-1 dans les limites
+  run qemu-img create -f raw "${OPENCORE_IMG}" 220M
+  # Table GPT + partition ESP en un seul appel (-Z -o puis -n 1:2048:-1)
+  run sgdisk -Z -o \
+    -n 1:2048:-1 -t 1:EF00 -c 1:"EFI System" \
+    "${OPENCORE_IMG}"
 
   # Monter via loop et formater
   local LOOP

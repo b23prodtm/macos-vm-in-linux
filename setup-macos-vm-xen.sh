@@ -294,11 +294,14 @@ build_opencore_img() {
     echo "${EFI_PATH}" > "${VM_DIR}/.ocs_efi_path"
   fi
 
-  run qemu-img create -f raw "${OPENCORE_IMG}" 200M
+  # 220M = 450560 secteurs → partition 2048:-1 dans les limites
+  run qemu-img create -f raw "${OPENCORE_IMG}" 220M
 
-  # Table GPT + partition ESP
-  run sgdisk -Z "${OPENCORE_IMG}"
-  run sgdisk -n 1:2048:411647 -t 1:EF00 -c 1:"EFI System" "${OPENCORE_IMG}"
+  # Table GPT + partition ESP en un seul appel sgdisk
+  # -Z : effacer, -o : nouvelle table GPT, -n 1:2048:-1 : jusqu'au dernier secteur
+  run sgdisk -Z -o \
+    -n 1:2048:-1 -t 1:EF00 -c 1:"EFI System" \
+    "${OPENCORE_IMG}"
 
   # Formater + copier via loop device
   local LOOP; LOOP=$(losetup --find --partscan --show "${OPENCORE_IMG}")
