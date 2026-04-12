@@ -126,8 +126,7 @@ jobs:
           echo "── Vérifications ──"
           sudo test -f "${VM_DIR}/macos-install.xl" && echo "✔ macos-install.xl" || { echo "✘ macos-install.xl absent"; exit 1; }
           sudo test -f "${VM_DIR}/macos.xl"         && echo "✔ macos.xl"         || { echo "✘ macos.xl absent"; exit 1; }
-          sudo test -f "${VM_DIR}/run-install.sh"   && echo "✔ run-install.sh"   || { echo "✘ run-install.sh absent"; exit 1; }
-          sudo test -f "${VM_DIR}/run.sh"           && echo "✔ run.sh"           || { echo "✘ run.sh absent"; exit 1; }
+          sudo test -f "${VM_DIR}/vm.sh"           && echo "✔ vm.sh"           || { echo "✘ vm.sh absent"; exit 1; }
 
           echo "── Validation du contenu macos-install.xl ──"
           sudo grep -q 'type.*=.*"hvm"'   "${VM_DIR}/macos-install.xl" && echo "✔ type=hvm"
