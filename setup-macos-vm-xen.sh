@@ -616,7 +616,6 @@ register_libvirt() {
       <driver name='qemu' type='raw' cache='none'/>
       <source file='${RECOVERY_IMG}'/>
       <target dev='hdc' bus='ide'/>
-      <transient/>
     </disk>"
     fi
 
@@ -657,7 +656,6 @@ register_libvirt() {
       <driver name='qemu' type='raw' cache='none'/>
       <source file='${OPENCORE_IMG}'/>
       <target dev='hda' bus='ide'/>
-      <transient/>
     </disk>
 
     <!-- macOS main disk -->
@@ -685,8 +683,6 @@ register_libvirt() {
 
     <!-- Audio : ich9 non supporté par Xen/libvirt → ac97 -->
     <sound model='ac97'/>
-
-    <memballoon model='none'/>
   </devices>
 </domain>
 XMLEOF
