@@ -415,9 +415,9 @@ hpet        = 1
 # access=rw + snapshot=on : qemu-xen IDE ne supporte pas access=ro
 # snapshot=on protège le fichier source (écritures dans un overlay temporaire)
 disk = [
-    'format=raw,  vdev=hda, access=rw, snapshot=on, target=${OPENCORE_IMG}',
+    'format=raw,  vdev=hda, access=rw, target=${OPENCORE_IMG}',
     'format=qcow2,vdev=hdb, access=rw,              target=${MACOS_DISK}',
-    'format=raw,  vdev=hdc, access=rw, snapshot=on, target=${RECOVERY_IMG}',
+    'format=raw,  vdev=hdc, access=rw, target=${RECOVERY_IMG}',
 ]
 
 # ── Réseau ────────────────────────────────────────────────────
@@ -468,7 +468,7 @@ acpi = 1
 hpet = 1
 
 disk = [
-    'format=raw,  vdev=hda, access=rw, snapshot=on, target=${OPENCORE_IMG}',
+    'format=raw,  vdev=hda, access=rw, target=${OPENCORE_IMG}',
     'format=qcow2,vdev=hdb, access=rw,              target=${MACOS_DISK}',
 ]
 
