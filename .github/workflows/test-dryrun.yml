@@ -29,10 +29,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        run: |
-          git clone --depth=1 --branch feat/vm-setup-scripts \
-            https://github.com/${{ github.repository }}.git .
-          git checkout ${{ github.sha }} 2>/dev/null || true
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Installer shellcheck
         run: sudo apt-get install -y shellcheck
@@ -61,10 +60,9 @@ jobs:
 
     steps:
       - name: Checkout
-        run: |
-          git clone --depth=1 --branch feat/vm-setup-scripts \
-            https://github.com/${{ github.repository }}.git .
-          git checkout ${{ github.sha }} 2>/dev/null || true
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Installer les dépendances minimales (dryrun)
         run: |
@@ -148,10 +146,9 @@ jobs:
 
     steps:
       - name: Checkout
-        run: |
-          git clone --depth=1 --branch feat/vm-setup-scripts \
-            https://github.com/${{ github.repository }}.git .
-          git checkout ${{ github.sha }} 2>/dev/null || true
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Installer les dépendances minimales
         run: |
