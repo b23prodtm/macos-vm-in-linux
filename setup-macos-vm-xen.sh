@@ -658,8 +658,8 @@ register_libvirt() {
       <model type='vga' vram='131072'/>
     </video>
 
-    <!-- Audio -->
-    <sound model='ich9'/>
+    <!-- Audio : ich9 non supporté par Xen/libvirt → ac97 -->
+    <sound model='ac97'/>
 
     <memballoon model='none'/>
   </devices>
