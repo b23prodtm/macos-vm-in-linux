@@ -527,32 +527,294 @@ on_crash    = "preserve"
 serial      = "none"
 XL
 
-  # Script wrapper de lancement
+  # Rétrocompatibilité : run-install.sh et run.sh délèguent à vm.sh
   cat > "${VM_DIR}/run-install.sh" <<'SH'
 #!/usr/bin/env bash
-# Lance la VM macOS en mode installation (Recovery monté)
-XLCFG="$(dirname "$0")/macos-install.xl"
-echo "[*] Démarrage VM macOS (mode installation) via xl..."
-$SUDO xl create "${XLCFG}"
-echo "[*] Pour voir l'écran, connectez un client VNC sur localhost:5900"
-echo "    Exemple : vncviewer localhost:5900"
-echo "    Ou via SSH : ssh -L 5900:127.0.0.1:5900 user@dom0 puis vncviewer localhost:5900"
+exec "$(dirname "$0")/vm.sh" start-install "$@"
 SH
   chmod +x "${VM_DIR}/run-install.sh"
 
   cat > "${VM_DIR}/run.sh" <<'SH'
 #!/usr/bin/env bash
-# Lance la VM macOS en mode normal (après installation)
-XLCFG="$(dirname "$0")/macos.xl"
-echo "[*] Démarrage VM macOS via xl..."
-$SUDO xl create "${XLCFG}"
-echo "[*] VNC : vncviewer localhost:5900"
+exec "$(dirname "$0")/vm.sh" start "$@"
 SH
   chmod +x "${VM_DIR}/run.sh"
+
+  # ── Script de gestion complet vm.sh ───────────────────────────
+  cat > "${VM_DIR}/vm.sh" <<VMSH
+#!/usr/bin/env bash
+# =============================================================
+#  vm.sh — Gestion de la VM macOS ${MACOS_VERSION} via xl
+#  Usage : ./vm.sh <commande>
+# =============================================================
+set -euo pipefail
+
+DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+VM_INSTALL="macos-${MACOS_VERSION}-install"
+VM_NORMAL="macos-${MACOS_VERSION}"
+XL_INSTALL="\${DIR}/macos-install.xl"
+XL_NORMAL="\${DIR}/macos.xl"
+VNC_PORT=5900
+
+# Détection sudo
+if [[ "\$(id -u)" -eq 0 ]]; then SUDO=""; else SUDO="sudo"; fi
+
+# Couleurs
+GRN='\033[0;32m'; YEL='\033[1;33m'; RED='\033[0;31m'
+BLU='\033[0;34m'; CYA='\033[0;36m'; RST='\033[0m'; BLD='\033[1m'
+ok()   { echo -e "\${GRN}[✔]\${RST} \$*"; }
+warn() { echo -e "\${YEL}[!]\${RST} \$*"; }
+err()  { echo -e "\${RED}[✘]\${RST} \$*" >&2; }
+info() { echo -e "\${BLU}[i]\${RST} \$*"; }
+sep()  { echo -e "\${CYA}────────────────────────────────────────────────────\${RST}"; }
+
+# Retourne le domid d'une VM ou "" si absente
+_domid() { \$SUDO xl list 2>/dev/null | awk -v n="\$1" '\$1==n{print \$2}'; }
+
+# Retourne l'état d'une VM : running | paused | absent
+_state() {
+  local S; S=\$(\$SUDO xl list 2>/dev/null | awk -v n="\$1" '\$1==n{print \$5}')
+  case "\$S" in
+    r*|b*) echo "running" ;;
+    p*)    echo "paused"  ;;
+    "")    echo "absent"  ;;
+    *)     echo "\$S"     ;;
+  esac
+}
+
+usage() {
+  sep
+  echo -e "\${BLD}  vm.sh — Gestion VM macOS ${MACOS_VERSION}\${RST}"
+  sep
+  cat <<EOF
+
+\${BLD}Commandes :\${RST}
+
+  \${BLD}start\${RST}           Démarrer la VM (mode normal, après installation)
+  \${BLD}start-install\${RST}   Démarrer en mode installation (avec Recovery)
+  \${BLD}stop\${RST}            Arrêt propre (ACPI shutdown)
+  \${BLD}kill\${RST}            Forcer l'arrêt immédiat (xl destroy)
+  \${BLD}restart\${RST}         Redémarrer la VM
+  \${BLD}pause\${RST}           Suspendre (gel de la VM)
+  \${BLD}resume\${RST}          Reprendre après pause
+  \${BLD}status\${RST}          Afficher l'état de la VM
+  \${BLD}list\${RST}            Lister toutes les VMs Xen actives
+  \${BLD}vnc\${RST}             Ouvrir le client VNC (vncviewer)
+  \${BLD}console\${RST}         Console série (Ctrl+] pour quitter)
+  \${BLD}log\${RST}             Derniers logs QEMU/Xen
+  \${BLD}info\${RST}            Infos détaillées (dominfo + vcpu-list)
+  \${BLD}help\${RST}            Afficher cette aide
+
+\${BLD}Exemples :\${RST}
+  ./vm.sh start-install   # 1er démarrage pour installer macOS
+  ./vm.sh vnc             # Se connecter à l'écran
+  ./vm.sh stop            # Éteindre proprement
+  ./vm.sh kill            # Forcer l'extinction
+  ./vm.sh log             # Voir les erreurs QEMU
+EOF
+  sep
+}
+
+cmd_start() {
+  local NAME="\${1:-\${VM_NORMAL}}"
+  local XLCFG="\${2:-\${XL_NORMAL}}"
+  local STATE; STATE=\$(_state "\${NAME}")
+
+  if [[ "\${STATE}" == "running" ]]; then
+    warn "La VM '\${NAME}' est déjà en cours d'exécution (domid: \$(_domid "\${NAME}"))."
+    info "Connectez-vous via VNC : vncviewer localhost:\${VNC_PORT}"
+    return 0
+  fi
+
+  [[ -f "\${XLCFG}" ]] || { err "Config xl introuvable : \${XLCFG}"; exit 1; }
+
+  info "Démarrage de '\${NAME}'..."
+  \$SUDO xl create "\${XLCFG}"
+  sleep 2
+
+  local DOMID; DOMID=\$(_domid "\${NAME}")
+  if [[ -n "\${DOMID}" ]]; then
+    ok "VM démarrée (domid: \${DOMID})"
+    info "VNC disponible sur localhost:\${VNC_PORT}"
+    info "Lancez : ./vm.sh vnc"
+  else
+    err "La VM n'apparaît pas dans xl list — vérifiez : ./vm.sh log"
+    exit 1
+  fi
+}
+
+cmd_start_install() {
+  info "Mode installation (Recovery monté)..."
+  cmd_start "\${VM_INSTALL}" "\${XL_INSTALL}"
+}
+
+cmd_stop() {
+  local NAME="\${VM_NORMAL}"
+  [[ "\$(_state "\${NAME}")" == "absent" ]] && NAME="\${VM_INSTALL}"
+  local STATE; STATE=\$(_state "\${NAME}")
+
+  if [[ "\${STATE}" == "absent" ]]; then
+    warn "Aucune VM macOS en cours d'exécution."
+    return 0
+  fi
+
+  info "Arrêt ACPI de '\${NAME}' (peut prendre 30s)..."
+  \$SUDO xl shutdown "\${NAME}"
+  local I=0
+  while [[ \$(_state "\${NAME}") != "absent" && \$I -lt 40 ]]; do
+    sleep 1; (( I++ )); printf '.'
+  done
+  echo ""
+  if [[ \$(_state "\${NAME}") == "absent" ]]; then
+    ok "VM arrêtée."
+  else
+    warn "La VM ne répond pas. Utilisez './vm.sh kill' pour forcer l'arrêt."
+  fi
+}
+
+cmd_kill() {
+  local NAME="\${VM_NORMAL}"
+  [[ "\$(_state "\${NAME}")" == "absent" ]] && NAME="\${VM_INSTALL}"
+
+  if [[ "\$(_state "\${NAME}")" == "absent" ]]; then
+    warn "Aucune VM macOS active à détruire."
+    return 0
+  fi
+  warn "Destruction forcée de '\${NAME}'..."
+  \$SUDO xl destroy "\${NAME}"
+  ok "VM détruite."
+}
+
+cmd_restart() {
+  local NAME="\${VM_NORMAL}"
+  [[ "\$(_state "\${NAME}")" == "absent" ]] && NAME="\${VM_INSTALL}"
+
+  if [[ "\$(_state "\${NAME}")" == "absent" ]]; then
+    warn "Aucune VM active. Lancement en mode normal..."
+    cmd_start; return
+  fi
+  info "Redémarrage de '\${NAME}'..."
+  \$SUDO xl reboot "\${NAME}"
+  ok "Redémarrage envoyé."
+}
+
+cmd_pause() {
+  local NAME="\${VM_NORMAL}"
+  [[ "\$(_state "\${NAME}")" == "absent" ]] && NAME="\${VM_INSTALL}"
+  \$SUDO xl pause "\${NAME}" && ok "VM suspendue." || err "Échec de la suspension."
+}
+
+cmd_resume() {
+  local NAME="\${VM_NORMAL}"
+  [[ "\$(_state "\${NAME}")" != "paused" ]] && NAME="\${VM_INSTALL}"
+  \$SUDO xl unpause "\${NAME}" && ok "VM reprise." || err "Échec de la reprise."
+}
+
+cmd_status() {
+  sep
+  echo -e "\${BLD}  État VM macOS ${MACOS_VERSION}\${RST}"
+  sep
+  for NAME in "\${VM_INSTALL}" "\${VM_NORMAL}"; do
+    local STATE; STATE=\$(_state "\${NAME}")
+    local DOMID; DOMID=\$(_domid "\${NAME}")
+    case "\${STATE}" in
+      running) echo -e "  \${GRN}●\${RST} \${BLD}\${NAME}\${RST} — \${GRN}en cours\${RST} (domid: \${DOMID})" ;;
+      paused)  echo -e "  \${YEL}⏸\${RST} \${BLD}\${NAME}\${RST} — \${YEL}suspendue\${RST} (domid: \${DOMID})" ;;
+      absent)  echo -e "  \${RED}○\${RST} \${BLD}\${NAME}\${RST} — arrêtée" ;;
+      *)       echo -e "  \${YEL}?\${RST} \${BLD}\${NAME}\${RST} — état: \${STATE}" ;;
+    esac
+  done
+  sep
+  local FREE_MEM; FREE_MEM=\$(\$SUDO xl info 2>/dev/null | awk '/^free_memory/{print \$3}')
+  [[ -n "\${FREE_MEM}" ]] && info "Mémoire Xen libre : \${FREE_MEM} Mo"
+  info "VNC : localhost:\${VNC_PORT}"
+  sep
+}
+
+cmd_list() { \$SUDO xl list; }
+
+cmd_vnc() {
+  if command -v vncviewer &>/dev/null; then
+    info "Connexion VNC sur localhost:\${VNC_PORT}..."
+    vncviewer "localhost:\${VNC_PORT}"
+  else
+    err "vncviewer introuvable."
+    info "Installez-le : sudo zypper install tigervnc"
+    info "Ou connectez-vous manuellement sur localhost:\${VNC_PORT}"
+  fi
+}
+
+cmd_console() {
+  local NAME="\${VM_NORMAL}"
+  [[ "\$(_state "\${NAME}")" == "absent" ]] && NAME="\${VM_INSTALL}"
+  if [[ "\$(_state "\${NAME}")" == "absent" ]]; then
+    err "Aucune VM macOS active."; exit 1
+  fi
+  info "Console série de '\${NAME}' (Ctrl+] pour quitter)..."
+  \$SUDO xl console "\${NAME}"
+}
+
+cmd_log() {
+  sep
+  echo -e "\${BLD}  Derniers logs Xen/QEMU\${RST}"
+  sep
+  local QLOG; QLOG=\$(ls -t /var/log/xen/qemu-dm-*.log 2>/dev/null | head -1 || true)
+  if [[ -n "\${QLOG}" ]]; then
+    info "Log QEMU : \${QLOG}"
+    echo ""
+    \$SUDO tail -40 "\${QLOG}"
+  else
+    warn "Aucun log QEMU trouvé dans /var/log/xen/"
+  fi
+  sep
+  for XLLOG in /var/log/xen/xl-${MACOS_VERSION}-install.log /var/log/xen/xl-${MACOS_VERSION}.log; do
+    if [[ -f "\${XLLOG}" ]]; then
+      info "Log xl : \${XLLOG}"
+      \$SUDO tail -20 "\${XLLOG}"
+      sep
+    fi
+  done
+}
+
+cmd_info() {
+  local NAME="\${VM_NORMAL}"
+  [[ "\$(_state "\${NAME}")" == "absent" ]] && NAME="\${VM_INSTALL}"
+  local DOMID; DOMID=\$(_domid "\${NAME}")
+  if [[ -z "\${DOMID}" ]]; then
+    err "VM non active. Démarrez-la d'abord."; exit 1
+  fi
+  \$SUDO xl dominfo "\${NAME}"
+  sep
+  \$SUDO xl vcpu-list "\${NAME}"
+}
+
+# ── Dispatch ─────────────────────────────────────────────────
+CMD="\${1:-help}"
+shift || true
+case "\${CMD}" in
+  start)          cmd_start ;;
+  start-install)  cmd_start_install ;;
+  stop)           cmd_stop ;;
+  kill)           cmd_kill ;;
+  restart)        cmd_restart ;;
+  pause)          cmd_pause ;;
+  resume)         cmd_resume ;;
+  status)         cmd_status ;;
+  list)           cmd_list ;;
+  vnc)            cmd_vnc ;;
+  console)        cmd_console ;;
+  log)            cmd_log ;;
+  info)           cmd_info ;;
+  help|--help|-h) usage ;;
+  *) err "Commande inconnue : '\${CMD}'"; usage; exit 1 ;;
+esac
+VMSH
+  chmod +x "${VM_DIR}/vm.sh"
 
   ok "Configs xl générées :"
   ok "  Installation : ${VM_DIR}/macos-install.xl"
   ok "  Normal       : ${VM_DIR}/macos.xl"
+  ok "  Gestion VM   : ${VM_DIR}/vm.sh"
 }
 
 # ── 9. Enregistrement libvirt (virt-manager) ──────────────────────────────────
@@ -724,8 +986,8 @@ ${BLD}CPUs       :${RST}  ${CPU_CORES}
 ${BLD}Bridge     :${RST}  ${BRIDGE:-"(aucun)"}
 
 ${BLD}${YEL}── Étape 1 : Installation macOS ──────────────────────────────${RST}
-  $SUDO xl create ${VM_DIR}/macos-install.xl
-  vncviewer localhost:5900
+  ${VM_DIR}/vm.sh start-install
+  ${VM_DIR}/vm.sh vnc
 
   Dans OpenCore picker :
     1. Sélectionner "Reset NVRAM" (1er démarrage uniquement)
@@ -734,14 +996,22 @@ ${BLD}${YEL}── Étape 1 : Installation macOS ──────────�
     4. Réinstaller macOS → sélectionner le disque APFS
 
 ${BLD}${YEL}── Étape 2 : Après installation ──────────────────────────────${RST}
-  $SUDO xl create ${VM_DIR}/macos.xl
-  vncviewer localhost:5900
+  ${VM_DIR}/vm.sh start
+  ${VM_DIR}/vm.sh vnc
 
-${BLD}${YEL}── Commandes xl utiles ────────────────────────────────────────${RST}
-  $SUDO xl list                        # VMs actives
-  $SUDO xl console macos-${MACOS_VERSION}      # Console série
-  $SUDO xl destroy macos-${MACOS_VERSION}      # Forcer l'extinction
-  $SUDO xl pause / $SUDO xl unpause          # Suspendre/reprendre
+${BLD}${YEL}── Commandes vm.sh ────────────────────────────────────────────${RST}
+  ./vm.sh start-install   # Démarrer en mode installation
+  ./vm.sh start           # Démarrer normalement
+  ./vm.sh stop            # Arrêt propre (ACPI)
+  ./vm.sh kill            # Forcer l'arrêt
+  ./vm.sh restart         # Redémarrer
+  ./vm.sh pause           # Suspendre
+  ./vm.sh resume          # Reprendre
+  ./vm.sh status          # État de la VM
+  ./vm.sh vnc             # Ouvrir VNC
+  ./vm.sh console         # Console série
+  ./vm.sh log             # Voir les logs QEMU/Xen
+  ./vm.sh info            # Infos détaillées
 
 ${BLD}${YEL}── Si VNC distant (SSH tunnel) ────────────────────────────────${RST}
   # Sur votre poste local :
@@ -754,8 +1024,7 @@ EOF
 
 launch_vm() {
   sep; log "Lancement de la VM macOS (mode installation)..."
-  $SUDO xl create "${VM_DIR}/macos-install.xl"
-  log "VM démarrée. Connectez-vous via VNC : vncviewer localhost:5900"
+  "${VM_DIR}/vm.sh" start-install
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -788,4 +1057,4 @@ if [[ "${DRYRUN:-0}" -eq 1 ]]; then
 fi
 
 read -r -p "Lancer la VM maintenant ($SUDO xl create) ? [o/N] " GO
-[[ "${GO,,}" == "o" ]] && launch_vm || ok "Lancez manuellement : bash ${VM_DIR}/run-install.sh"
+[[ "${GO,,}" == "o" ]] && launch_vm || ok "Lancez manuellement : ${VM_DIR}/vm.sh start-install"
