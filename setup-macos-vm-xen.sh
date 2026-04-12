@@ -100,10 +100,12 @@ check_xen() {
   sep; log "Vérification de l'environnement Xen..."
 
   # dom0 ?
-  if [[ ! -d /proc/xen ]]; then
-    die "/proc/xen absent. Ce script doit tourner dans un dom0 Xen."
+  # XEN_PROC_DIR permet de surcharger /proc/xen (utile en CI/dryrun)
+  local XEN_DIR="${XEN_PROC_DIR:-/proc/xen}"
+  if [[ ! -d "${XEN_DIR}" ]]; then
+    die "${XEN_DIR} absent. Ce script doit tourner dans un dom0 Xen."
   fi
-  if ! grep -q "control_d" /proc/xen/capabilities 2>/dev/null; then
+  if ! grep -q "control_d" "${XEN_DIR}/capabilities" 2>/dev/null; then
     die "Pas en dom0 (capabilities ne contient pas 'control_d')."
   fi
   ok "Xen dom0 confirmé"
@@ -255,6 +257,14 @@ EOF
 build_opencore_img() {
   sep; log "Construction de l'image OpenCore (ESP 200 Mo)..."
 
+  # En dryrun : simuler sans résolution EFI ni accès disque
+  if [[ "${DRYRUN:-0}" -eq 1 ]]; then
+    echo -e "${CYA}[dryrun]${RST} qemu-img create -f raw ${OPENCORE_IMG} 200M"
+    echo -e "${CYA}[dryrun]${RST} sgdisk + mkfs.fat + cp EFI → ${OPENCORE_IMG}"
+    ok "Image OpenCore simulée (dryrun)"
+    return 0
+  fi
+
   # ── Résoudre le chemin EFI (priorité : cache → recherche → saisie manuelle)
   local EFI_PATH=""
 
@@ -284,11 +294,14 @@ build_opencore_img() {
     echo "${EFI_PATH}" > "${VM_DIR}/.ocs_efi_path"
   fi
 
-  run qemu-img create -f raw "${OPENCORE_IMG}" 200M
+  # 220M = 450560 secteurs → partition 2048:-1 dans les limites
+  run qemu-img create -f raw "${OPENCORE_IMG}" 220M
 
-  # Table GPT + partition ESP
-  run sgdisk -Z "${OPENCORE_IMG}"
-  run sgdisk -n 1:2048:411647 -t 1:EF00 -c 1:"EFI System" "${OPENCORE_IMG}"
+  # Table GPT + partition ESP en un seul appel sgdisk
+  # -Z : effacer, -o : nouvelle table GPT, -n 1:2048:-1 : jusqu'au dernier secteur
+  run sgdisk -Z -o \
+    -n 1:2048:-1 -t 1:EF00 -c 1:"EFI System" \
+    "${OPENCORE_IMG}"
 
   # Formater + copier via loop device
   local LOOP; LOOP=$(losetup --find --partscan --show "${OPENCORE_IMG}")

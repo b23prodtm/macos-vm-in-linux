@@ -28,7 +28,11 @@ jobs:
     name: ShellCheck (syntaxe)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        run: |
+          git clone --depth=1 --branch feat/vm-setup-scripts \
+            https://github.com/${{ github.repository }}.git .
+          git checkout ${{ github.sha }} 2>/dev/null || true
 
       - name: Installer shellcheck
         run: sudo apt-get install -y shellcheck
@@ -56,7 +60,11 @@ jobs:
     needs: shellcheck
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        run: |
+          git clone --depth=1 --branch feat/vm-setup-scripts \
+            https://github.com/${{ github.repository }}.git .
+          git checkout ${{ github.sha }} 2>/dev/null || true
 
       - name: Installer les dépendances minimales (dryrun)
         run: |
@@ -74,10 +82,11 @@ jobs:
           echo "/tmp/fake-ocs/Results/EFI" \
             > "${HOME}/VMs/macos-${MACOS_VERSION}/.ocs_efi_path"
 
-      - name: Mocker /proc/xen (Xen dom0 check)
+      - name: Mocker Xen dom0 (via XEN_PROC_DIR)
         run: |
-          sudo mkdir -p /proc/xen
-          echo "control_d" | sudo tee /proc/xen/capabilities
+          # /proc est un vfs — on simule dans /tmp
+          mkdir -p /tmp/mock-xen
+          echo "control_d" > /tmp/mock-xen/capabilities
           # Mocker xl
           sudo tee /usr/local/bin/xl > /dev/null <<'XL'
           #!/usr/bin/env bash
@@ -98,7 +107,7 @@ jobs:
 
       - name: Exécuter setup-macos-vm-xen.sh --skip-ocs --dryrun
         run: |
-          sudo bash setup-macos-vm-xen.sh \
+          sudo XEN_PROC_DIR=/tmp/mock-xen bash setup-macos-vm-xen.sh \
             --macos "${MACOS_VERSION}" \
             --skip-deps \
             --skip-ocs \
@@ -106,6 +115,7 @@ jobs:
             --dryrun
         env:
           HOME: /root
+          MACOS_VERSION: ${{ env.MACOS_VERSION }}
 
       - name: Vérifier les fichiers générés
         run: |
@@ -136,7 +146,11 @@ jobs:
     needs: shellcheck
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        run: |
+          git clone --depth=1 --branch feat/vm-setup-scripts \
+            https://github.com/${{ github.repository }}.git .
+          git checkout ${{ github.sha }} 2>/dev/null || true
 
       - name: Installer les dépendances minimales
         run: |
