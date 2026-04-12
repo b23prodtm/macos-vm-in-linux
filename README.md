@@ -238,7 +238,86 @@ sudo zypper install gptfdisk
 
 ---
 
-## Mise à jour de l'EFI OpenCore
+## Mise à jour de la configuration OpenCore (config.plist)
+
+Cette procédure permet de modifier le `config.plist` généré par OpCore Simplify
+et de reconstruire l'image `OpenCore.img` sans relancer une installation complète.
+
+### Cas d'usage typiques
+
+- Corriger un paramètre de boot (boot-args, SecureBootModel, PickerMode…)
+- Ajouter ou désactiver un kext
+- Appliquer un fix spécifique à la VM (LapicKernelPanic, TscSyncTimeout…)
+- Mettre à jour OpenCore vers une nouvelle version
+
+### Workflow
+
+```bash
+# 1. Localiser le config.plist dans les résultats d'OpCore Simplify
+ls ~/opcore-simplify/Results/EFI/OC/config.plist
+
+# 2. Éditer le fichier directement
+nano ~/opcore-simplify/Results/EFI/OC/config.plist
+# ou copier un config.plist préparé à la place
+cp /chemin/vers/mon/config.plist ~/opcore-simplify/Results/EFI/OC/config.plist
+
+# 3. Reconstruire uniquement OpenCore.img (--skip-ocs = EFI déjà prêt)
+sudo bash setup-macos-vm-xen.sh \
+  --macos big-sur \
+  --skip-deps \
+  --skip-ocs \
+  --skip-recovery \
+  --skip-libvirt
+# → Le script demande "Reconstruire l'image existante ? [o/N]" → répondre o
+
+# 4. Relancer la VM
+~/VMs/macos-big-sur/vm.sh kill 2>/dev/null || true
+~/VMs/macos-big-sur/vm.sh start-install
+~/VMs/macos-big-sur/vm.sh vnc
+```
+
+### Paramètres recommandés pour une VM Xen
+
+Les réglages suivants sont appliqués automatiquement par OpCore Simplify
+quand il détecte un environnement Xen/QEMU (branche `fix/validator`).
+Si vous éditez le `config.plist` manuellement, vérifiez ces valeurs :
+
+| Section | Clé | Valeur VM | Raison |
+|---|---|---|---|
+| `Misc.Boot` | `PickerMode` | `Builtin` | OpenCanopy nécessite `Resources/` absent en VM |
+| `Misc.Security` | `SecureBootModel` | `Disabled` | Pas de puce T2 en VM |
+| `Misc.Security` | `DmgLoading` | `Any` | Recovery non signé possible |
+| `Misc.Security` | `ApECID` | `0` | Désactive la personnalisation SB |
+| `Kernel.Quirks` | `LapicKernelPanic` | `true` | Interruptions LAPIC non masquées sous Xen |
+| `Kernel.Quirks` | `ProvideCurrentCpuInfo` | `true` | TSC = 0 Hz dans Xen |
+| `Booter.Quirks` | `RebuildAppleMemoryMap` | `true` | GetMemoryMap corrompu dans Xen |
+| `UEFI.Drivers` | `OpenCanopy.efi` | `Enabled: false` | Pas de dossier `Resources/` en VM |
+| `UEFI.Output` | `TextRenderer` | `SystemGeneric` | Compatible VGA Xen |
+| `UEFI.Output` | `Resolution` | `1024x768` | VGA Xen sans détection auto |
+| `UEFI.Output` | `DirectGopRendering` | `true` | Rendu GOP direct Xen |
+| `UEFI.Quirks` | `TscSyncTimeout` | `1000` | Sync TSC entre vCPUs Xen |
+| `UEFI.Quirks` | `DisableSecurityPolicy` | `true` | OC 0.9.7+ force x86legacy sinon |
+
+### Vérification sans redémarrer la VM
+
+Pour inspecter le `config.plist` actuellement monté dans `OpenCore.img` :
+
+```bash
+# Monter l'image en lecture seule
+sudo losetup -Pf --read-only ~/VMs/macos-big-sur/OpenCore.img
+sudo mount -o ro /dev/loop0p1 /mnt/efi
+
+# Lire la config active
+grep -A1 "PickerMode\|SecureBootModel\|DisableSecurityPolicy" /mnt/efi/EFI/OC/config.plist
+
+# Démonter
+sudo umount /mnt/efi
+sudo losetup -d /dev/loop0
+```
+
+---
+
+## Mise à jour de l'EFI OpenCore (régénération complète)
 
 Après une mise à jour d'OpenCore Simplify ou de votre config :
 
