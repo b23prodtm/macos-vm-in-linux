@@ -565,5 +565,10 @@ create_macos_disk
 generate_launch_script
 print_summary
 
+if [[ "${DRYRUN:-0}" -eq 1 ]]; then
+  ok "Dry-run terminé avec succès."
+  exit 0
+fi
+
 read -r -p "Lancer la VM maintenant ? [o/N] " START
 [[ "${START,,}" == "o" ]] && launch_vm || ok "VM prête. Lancez manuellement : bash ${VM_DIR}/run-macos.sh"

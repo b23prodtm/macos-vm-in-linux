@@ -122,20 +122,20 @@ jobs:
           set -e
           VM_DIR="/root/VMs/macos-${MACOS_VERSION}"
           echo "── Contenu de ${VM_DIR} ──"
-          ls -lh "${VM_DIR}/"
+          sudo ls -lh "${VM_DIR}/"
 
           echo "── Vérifications ──"
-          [[ -f "${VM_DIR}/macos-install.xl" ]] && echo "✔ macos-install.xl" || { echo "✘ macos-install.xl absent"; exit 1; }
-          [[ -f "${VM_DIR}/macos.xl" ]]         && echo "✔ macos.xl"         || { echo "✘ macos.xl absent"; exit 1; }
-          [[ -f "${VM_DIR}/run-install.sh" ]]   && echo "✔ run-install.sh"   || { echo "✘ run-install.sh absent"; exit 1; }
-          [[ -f "${VM_DIR}/run.sh" ]]           && echo "✔ run.sh"           || { echo "✘ run.sh absent"; exit 1; }
+          sudo test -f "${VM_DIR}/macos-install.xl" && echo "✔ macos-install.xl" || { echo "✘ macos-install.xl absent"; exit 1; }
+          sudo test -f "${VM_DIR}/macos.xl"         && echo "✔ macos.xl"         || { echo "✘ macos.xl absent"; exit 1; }
+          sudo test -f "${VM_DIR}/run-install.sh"   && echo "✔ run-install.sh"   || { echo "✘ run-install.sh absent"; exit 1; }
+          sudo test -f "${VM_DIR}/run.sh"           && echo "✔ run.sh"           || { echo "✘ run.sh absent"; exit 1; }
 
           echo "── Validation du contenu macos-install.xl ──"
-          grep -q 'type.*=.*"hvm"'   "${VM_DIR}/macos-install.xl" && echo "✔ type=hvm"
-          grep -q 'bios.*=.*"ovmf"'  "${VM_DIR}/macos-install.xl" && echo "✔ bios=ovmf"
-          grep -q 'OpenCore.img'     "${VM_DIR}/macos-install.xl" && echo "✔ OpenCore.img référencé"
-          grep -q 'BaseSystem.img'   "${VM_DIR}/macos-install.xl" && echo "✔ BaseSystem.img référencé"
-          grep -q 'macos.qcow2'      "${VM_DIR}/macos-install.xl" && echo "✔ macos.qcow2 référencé"
+          sudo grep -q 'type.*=.*"hvm"'   "${VM_DIR}/macos-install.xl" && echo "✔ type=hvm"
+          sudo grep -q 'bios.*=.*"ovmf"'  "${VM_DIR}/macos-install.xl" && echo "✔ bios=ovmf"
+          sudo grep -q 'OpenCore.img'     "${VM_DIR}/macos-install.xl" && echo "✔ OpenCore.img référencé"
+          sudo grep -q 'BaseSystem.img'   "${VM_DIR}/macos-install.xl" && echo "✔ BaseSystem.img référencé"
+          sudo grep -q 'macos.qcow2'      "${VM_DIR}/macos-install.xl" && echo "✔ macos.qcow2 référencé"
 
   # ────────────────────────────────────────────────────────────────
   # Job 3 : dry-run du script KVM (--skip-ocs --dryrun)
@@ -193,16 +193,16 @@ jobs:
           set -e
           VM_DIR="/root/VMs/macos-${MACOS_VERSION}"
           echo "── Contenu de ${VM_DIR} ──"
-          ls -lh "${VM_DIR}/"
+          sudo ls -lh "${VM_DIR}/"
 
           echo "── Vérifications ──"
-          [[ -f "${VM_DIR}/run-macos.sh" ]]           && echo "✔ run-macos.sh"           || { echo "✘ absent"; exit 1; }
-          [[ -f "${VM_DIR}/run-macos-installed.sh" ]] && echo "✔ run-macos-installed.sh" || { echo "✘ absent"; exit 1; }
+          sudo test -f "${VM_DIR}/run-macos.sh"           && echo "✔ run-macos.sh"           || { echo "✘ absent"; exit 1; }
+          sudo test -f "${VM_DIR}/run-macos-installed.sh" && echo "✔ run-macos-installed.sh" || { echo "✘ absent"; exit 1; }
 
           echo "── Validation du contenu run-macos.sh ──"
-          grep -q 'qemu-system-x86_64'  "${VM_DIR}/run-macos.sh" && echo "✔ qemu-system-x86_64"
-          grep -q 'machine q35'         "${VM_DIR}/run-macos.sh" && echo "✔ machine q35"
-          grep -q 'OpenCore.img'        "${VM_DIR}/run-macos.sh" && echo "✔ OpenCore.img référencé"
+          sudo grep -q 'qemu-system-x86_64'  "${VM_DIR}/run-macos.sh" && echo "✔ qemu-system-x86_64"
+          sudo grep -q 'machine q35'         "${VM_DIR}/run-macos.sh" && echo "✔ machine q35"
+          sudo grep -q 'OpenCore.img'        "${VM_DIR}/run-macos.sh" && echo "✔ OpenCore.img référencé"
 
   # ────────────────────────────────────────────────────────────────
   # Résumé final
