@@ -45,7 +45,7 @@ OCS_DIR="${HOME}/opcore-simplify"
 OCS_REPO="https://github.com/b23prodtm/OpCore-Simplify.git"
 OCS_BRANCH="fix/validator"
 
-SKIP_DEPS=0; SKIP_OCS=0; SKIP_RECOVERY=0; RUN_ONLY=0; DRYRUN=0
+SKIP_DEPS=0; SKIP_OCS=0; SKIP_RECOVERY=0; RUN_ONLY=0; DRYRUN=0; SKIP_LIBVIRT=0
 
 usage() {
 cat <<EOF
@@ -62,6 +62,7 @@ ${BLD}Usage :${RST} $0 [OPTIONS]
   --skip-deps          Ne pas installer les paquets
   --skip-ocs           EFI déjà généré
   --skip-recovery      Ne pas re-télécharger le BaseSystem
+  --skip-libvirt       Ne pas enregistrer dans libvirt/virt-manager
   --run-only           Lancer la VM directement (xl create)
   --dryrun             Simuler toutes les étapes sans rien écrire ni installer
   --help
@@ -81,6 +82,7 @@ while [[ $# -gt 0 ]]; do
     --skip-deps)     SKIP_DEPS=1;        shift   ;;
     --skip-ocs)      SKIP_OCS=1;         shift   ;;
     --skip-recovery) SKIP_RECOVERY=1;    shift   ;;
+    --skip-libvirt)  SKIP_LIBVIRT=1;     shift   ;;
     --run-only)      RUN_ONLY=1;         shift   ;;
     --dryrun)        DRYRUN=1;           shift   ;;
     --help|-h)       usage ;;
@@ -517,6 +519,139 @@ SH
   ok "  Normal       : ${VM_DIR}/macos.xl"
 }
 
+# ── 9. Enregistrement libvirt (virt-manager) ──────────────────────────────────
+register_libvirt() {
+  sep; log "Enregistrement dans libvirt (virt-manager)..."
+
+  # Vérifier que libvirt+virsh sont disponibles
+  if ! command -v virsh &>/dev/null; then
+    warn "virsh introuvable — installation de libvirt..."
+    run zypper --non-interactive install --no-recommends \
+      libvirt libvirt-daemon-xen virt-manager virsh
+  fi
+
+  # S'assurer que le daemon libvirt tourne
+  if ! systemctl is-active --quiet libvirtd 2>/dev/null; then
+    run systemctl enable --now libvirtd
+  fi
+
+  if [[ "${DRYRUN:-0}" -eq 1 ]]; then
+    echo -e "${CYA}[dryrun]${RST} virsh -c xen:/// define ${VM_DIR}/macos-${MACOS_VERSION}.xml"
+    echo -e "${CYA}[dryrun]${RST} virsh -c xen:/// define ${VM_DIR}/macos-${MACOS_VERSION}-install.xml"
+    ok "Enregistrement libvirt simulé (dryrun)"
+    return 0
+  fi
+
+  # Générer le XML libvirt — mode normal
+  local NVRAM_LINE=""
+  [[ -f "${VM_DIR}/OVMF_VARS.fd" ]] && \
+    NVRAM_LINE="<nvram>${VM_DIR}/OVMF_VARS.fd</nvram>"
+
+  local NET_XML=""
+  if [[ -n "${BRIDGE}" ]]; then
+    NET_XML="<interface type='bridge'>
+      <source bridge='${BRIDGE}'/>
+      <model type='e1000'/>
+    </interface>"
+  fi
+
+  _write_libvirt_xml() {
+    local NAME="$1" XMLFILE="$2" WITH_RECOVERY="$3"
+    local RECOVERY_DISK=""
+    if [[ "${WITH_RECOVERY}" == "1" ]]; then
+      RECOVERY_DISK="
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='raw' cache='none'/>
+      <source file='${RECOVERY_IMG}'/>
+      <target dev='hdc' bus='ide'/>
+      <transient/>
+    </disk>"
+    fi
+
+    cat > "${XMLFILE}" <<XMLEOF
+<domain type='xen'>
+  <name>${NAME}</name>
+  <memory unit='MiB'>${RAM_MB}</memory>
+  <currentMemory unit='MiB'>${RAM_MB}</currentMemory>
+  <vcpu placement='static'>${CPU_CORES}</vcpu>
+
+  <os firmware='efi'>
+    <type arch='x86_64' machine='xenfv'>hvm</type>
+    <loader readonly='no' type='pflash'>${OVMF_CODE}</loader>
+    ${NVRAM_LINE}
+    <boot dev='hd'/>
+  </os>
+
+  <features>
+    <apic/>
+    <acpi/>
+    <hap/>
+    <viridian/>
+  </features>
+
+  <cpu mode='host-passthrough'>
+    <topology sockets='1' cores='${CPU_CORES}' threads='1'/>
+  </cpu>
+
+  <clock offset='localtime'/>
+
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>preserve</on_crash>
+
+  <devices>
+    <!-- OpenCore EFI boot disk -->
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='raw' cache='none'/>
+      <source file='${OPENCORE_IMG}'/>
+      <target dev='hda' bus='ide'/>
+      <transient/>
+    </disk>
+
+    <!-- macOS main disk -->
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' cache='unsafe' discard='unmap'/>
+      <source file='${MACOS_DISK}'/>
+      <target dev='hdb' bus='ide'/>
+    </disk>
+    ${RECOVERY_DISK}
+
+    <!-- Réseau -->
+    ${NET_XML}
+
+    <!-- USB tablet pour la souris -->
+    <input type='tablet' bus='usb'/>
+    <input type='keyboard' bus='usb'/>
+
+    <!-- Affichage VNC -->
+    <graphics type='vnc' port='5910' listen='127.0.0.1' autoport='no'>
+      <listen type='address' address='127.0.0.1'/>
+    </graphics>
+    <video>
+      <model type='vga' vram='131072'/>
+    </video>
+
+    <!-- Audio -->
+    <sound model='ich9'/>
+
+    <memballoon model='none'/>
+  </devices>
+</domain>
+XMLEOF
+  }
+
+  _write_libvirt_xml "macos-${MACOS_VERSION}"         "${VM_DIR}/macos-${MACOS_VERSION}.xml"         "0"
+  _write_libvirt_xml "macos-${MACOS_VERSION}-install" "${VM_DIR}/macos-${MACOS_VERSION}-install.xml" "1"
+
+  # Enregistrer dans libvirt via le driver Xen
+  virsh -c xen:/// define "${VM_DIR}/macos-${MACOS_VERSION}.xml"
+  virsh -c xen:/// define "${VM_DIR}/macos-${MACOS_VERSION}-install.xml"
+
+  ok "VM enregistrées dans libvirt (driver xen:///)"
+  ok "Ouvrez virt-manager → Fichier → Ajouter une connexion → Xen"
+  ok "ou : virt-manager --connect xen:///"
+}
+
 # ── 9. Résumé final ───────────────────────────────────────────────────────────
 print_summary() {
   sep
@@ -585,6 +720,7 @@ build_opencore_img
 [[ "$SKIP_RECOVERY" -eq 0 ]] && download_recovery
 create_macos_disk
 generate_xl_config
+[[ "$SKIP_LIBVIRT" -eq 0 ]] && register_libvirt
 print_summary
 
 if [[ "${DRYRUN:-0}" -eq 1 ]]; then

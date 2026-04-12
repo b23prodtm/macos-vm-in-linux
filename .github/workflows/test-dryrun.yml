@@ -112,6 +112,7 @@ jobs:
             --skip-deps \
             --skip-ocs \
             --skip-recovery \
+            --skip-libvirt \
             --dryrun
         env:
           HOME: /root
