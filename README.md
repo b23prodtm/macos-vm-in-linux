@@ -185,6 +185,13 @@ sudo modprobe kvm_intel   # ou kvm_amd
 
 ## Dépannage
 
+### Redémarrage de la VM
+
+```
+cd ~/VMs/macos-ventura
+bash vm.sh kill && bash vm.sh restart && bash vm.sh vnc
+```
+
 ### Écran noir au démarrage
 
 ```
